@@ -22,6 +22,25 @@ func (s *Server) uiSettingsPanel(c echo.Context) error {
 	sb.WriteString("<div id='main' class='main settings-panel'>")
 	sb.WriteString("<h2>Settings</h2>")
 	sb.WriteString("<p class='muted small'>Runtime, hardware, and provider defaults.</p>")
+
+	// Health issues banner (above the runtime card so it's the first thing users see)
+	for _, issue := range st.HealthIssues() {
+		cls := "banner error"
+		icon := "⚠"
+		if issue.Severity == "warn" {
+			cls = "banner warn"
+			icon = "ℹ"
+		}
+		sb.WriteString(fmt.Sprintf("<div class='%s' style='margin-top:16px;padding:12px 14px;border-radius:8px;border:1px solid var(--border)'>", cls))
+		sb.WriteString(fmt.Sprintf("<strong>%s %s</strong>", icon, template.HTMLEscapeString(issue.Title)))
+		sb.WriteString(fmt.Sprintf("<div class='small' style='margin-top:4px'>%s</div>", template.HTMLEscapeString(issue.Detail)))
+		if issue.Fix != "" {
+			sb.WriteString(fmt.Sprintf("<div class='mono small' style='margin-top:8px;padding:8px 10px;background:rgba(0,0,0,0.25);border-radius:6px;user-select:all;white-space:pre-wrap;word-break:break-all'>%s</div>",
+				template.HTMLEscapeString(issue.Fix)))
+		}
+		sb.WriteString("</div>")
+	}
+
 	sb.WriteString("<section class='settings-card' style='margin-top:24px'>")
 	sb.WriteString("<h3>Embedder runtime</h3>")
 
@@ -65,9 +84,22 @@ func (s *Server) uiSettingsPanel(c echo.Context) error {
 	sb.WriteString("<div class='settings-row-value'>")
 	if st.ContainerToolkit {
 		sb.WriteString("<span class='badge accent'>nvidia-container-runtime ready</span>")
+		// Show CDI device count if known
+		if st.CDIDevices > 0 {
+			sb.WriteString(fmt.Sprintf(" <span class='badge accent'>%d CDI device(s)</span>", st.CDIDevices))
+		} else if st.HostType == "rancher-desktop" || st.HostType == "linux" {
+			sb.WriteString(" <span class='badge'>no CDI devices</span>")
+		}
 	} else {
 		sb.WriteString("<span class='badge'>not registered</span>")
-		sb.WriteString("<div class='muted small' style='margin-top:6px'>Run <span class='mono'>sudo nvidia-ctk runtime configure --runtime=docker</span> on the host, then restart docker.</div>")
+		if st.HostType == "rancher-desktop" {
+			sb.WriteString("<div class='muted small' style='margin-top:6px'>Rancher Desktop detected. See the banner above for the repair command.</div>")
+		} else {
+			sb.WriteString("<div class='muted small' style='margin-top:6px'>Run <span class='mono'>sudo nvidia-ctk runtime configure --runtime=docker</span> on the host, then restart docker.</div>")
+		}
+	}
+	if st.HostType != "" && st.HostType != "unknown" {
+		sb.WriteString(fmt.Sprintf("<div class='muted small mono' style='margin-top:6px'>host: %s</div>", template.HTMLEscapeString(st.HostType)))
 	}
 	sb.WriteString("</div></div>")
 

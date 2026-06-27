@@ -82,11 +82,19 @@ func dockerRemoveContainer(ctx context.Context, name string) error {
 
 // dockerStartEmbedder creates + starts a new bit-rag-embedder container with
 // the given image, optionally with NVIDIA GPU access.
+//
+// GPU attach strategy: we prefer CDI (nvidia.com/gpu=all) because it works on
+// modern Docker (>= 25) and is the only path that works on Rancher Desktop's
+// Alpine WSL distro (where nvidia-container-cli segfaults but the CDI hook
+// works). We fall back to legacy DeviceRequests when CDI isn't available.
 func dockerStartEmbedder(ctx context.Context, image string, useGPU bool) error {
-	// Create container payload (subset of Docker create API).
-	type endpoints struct {
-		// Empty placeholder for future bridge config
+	useCDI := false
+	if useGPU {
+		if countCDIDevices(ctx) > 0 {
+			useCDI = true
+		}
 	}
+	// Create container payload (subset of Docker create API).
 	type deviceRequest struct {
 		Driver       string     `json:"Driver"`
 		Count        int        `json:"Count"`
@@ -97,13 +105,14 @@ func dockerStartEmbedder(ctx context.Context, image string, useGPU bool) error {
 		RestartPolicy  map[string]any  `json:"RestartPolicy"`
 		DeviceRequests []deviceRequest `json:"DeviceRequests,omitempty"`
 		Runtime        string          `json:"Runtime,omitempty"`
+		CDIDevices     []string        `json:"CDIDevices,omitempty"` // Docker >= 25
 	}
 	type createReq struct {
-		Image      string            `json:"Image"`
-		Cmd        []string          `json:"Cmd,omitempty"`
-		Env        []string          `json:"Env,omitempty"`
-		ExposedPorts map[string]any  `json:"ExposedPorts,omitempty"`
-		HostConfig hostConfig        `json:"HostConfig"`
+		Image        string         `json:"Image"`
+		Cmd          []string       `json:"Cmd,omitempty"`
+		Env          []string       `json:"Env,omitempty"`
+		ExposedPorts map[string]any `json:"ExposedPorts,omitempty"`
+		HostConfig   hostConfig     `json:"HostConfig"`
 	}
 	cr := createReq{
 		Image: image,
@@ -113,11 +122,22 @@ func dockerStartEmbedder(ctx context.Context, image string, useGPU bool) error {
 		},
 	}
 	if useGPU {
-		cr.HostConfig.DeviceRequests = []deviceRequest{{
-			Driver:       "nvidia",
-			Count:        -1, // all GPUs
-			Capabilities: [][]string{{"gpu"}},
-		}}
+		if useCDI {
+			// Modern CDI path — works everywhere CDI is enabled, including
+			// Rancher Desktop. The runtime injects /dev/dxg (or /dev/nvidia*)
+			// + driver libraries automatically.
+			cr.HostConfig.Runtime = "nvidia"
+			cr.HostConfig.CDIDevices = []string{"nvidia.com/gpu=all"}
+		} else {
+			// Legacy path — relies on nvidia-container-cli (does NOT work on
+			// Rancher Desktop Alpine). Kept for native Linux / Docker Desktop
+			// hosts that haven't migrated to CDI yet.
+			cr.HostConfig.DeviceRequests = []deviceRequest{{
+				Driver:       "nvidia",
+				Count:        -1, // all GPUs
+				Capabilities: [][]string{{"gpu"}},
+			}}
+		}
 	}
 	payload, _ := json.Marshal(cr)
 	body, err := dockerSocketPost(ctx, "/var/run/docker.sock",

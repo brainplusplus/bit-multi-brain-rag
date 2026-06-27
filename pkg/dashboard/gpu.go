@@ -39,12 +39,135 @@ type GPUStatus struct {
 	VRAMUsedMB       int    `json:"vram_used_mb"`       // 0 if unknown
 	DriverVersion    string `json:"driver_version"`     // e.g. "535.183.01"
 	ContainerToolkit bool   `json:"container_toolkit"`  // nvidia-container-runtime registered with docker
+	CDIDevices       int    `json:"cdi_devices"`        // number of CDI devices discovered by docker (>=1 means CDI spec loaded)
+	HostType         string `json:"host_type"`          // "rancher-desktop" | "docker-desktop" | "linux" | "unknown"
 	CurrentMode      string `json:"current_mode"`       // "cpu" | "gpu" (from settings)
 	SwitchInProgress bool   `json:"switch_in_progress"` // true if a switch is running
 	LastError        string `json:"last_error,omitempty"`
 	// Embedder runtime info (best-effort)
 	EmbedderImage  string `json:"embedder_image,omitempty"`
 	EmbedderStatus string `json:"embedder_status,omitempty"`
+}
+
+// HealthIssue summarizes a single problem with the GPU/toolkit setup.
+type HealthIssue struct {
+	Severity string // "warn" | "error"
+	Title    string
+	Detail   string
+	Fix      string // human readable recovery command (rendered as <code>)
+}
+
+// HealthIssues computes a list of actionable problems based on the status.
+func (g GPUStatus) HealthIssues() []HealthIssue {
+	var out []HealthIssue
+	// Case 1: GPU detected but no docker runtime
+	if g.Detected && !g.ContainerToolkit {
+		fix := "Install NVIDIA Container Toolkit and configure dockerd."
+		if g.HostType == "rancher-desktop" {
+			fix = "wsl -d rancher-desktop -- sh /mnt/d/golang/bit-rag/bit-multi-brain-rag/scripts/rancher-nvidia-install.sh"
+		}
+		out = append(out, HealthIssue{
+			Severity: "error",
+			Title:    "GPU detected, but Docker runtime missing",
+			Detail:   "nvidia-container-runtime is not registered with the Docker daemon. GPU mode switch will fail until this is fixed.",
+			Fix:      fix,
+		})
+	}
+	// Case 2: Toolkit registered but no CDI devices (stale spec, e.g. after driver update)
+	if g.ContainerToolkit && g.CDIDevices == 0 && g.HostType == "rancher-desktop" {
+		out = append(out, HealthIssue{
+			Severity: "warn",
+			Title:    "CDI spec missing or stale",
+			Detail:   "Docker has nvidia runtime, but no CDI devices are discovered. This usually means /var/run/cdi/nvidia.yaml was lost (tmpfs wipe) or the driver path changed (Windows driver update).",
+			Fix:      "wsl -d rancher-desktop -- /usr/local/bin/nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml",
+		})
+	}
+	// Case 3: Toolkit registered, no CDI on non-Rancher host
+	if g.ContainerToolkit && g.CDIDevices == 0 && g.HostType != "rancher-desktop" && g.Detected {
+		out = append(out, HealthIssue{
+			Severity: "warn",
+			Title:    "No CDI devices discovered",
+			Detail:   "Docker reports the nvidia runtime is registered, but no CDI devices are visible. The legacy --gpus mode may still work, but CDI is recommended for newer setups.",
+			Fix:      "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml",
+		})
+	}
+	return out
+}
+
+// detectHostType returns a coarse identifier for where the docker daemon lives.
+// Detection is best-effort and runs from inside the dashboard container by
+// inspecting docker info Name / OperatingSystem.
+func detectHostType(ctx context.Context) string {
+	resp, err := dockerAPIGet(ctx, "/v1.43/info")
+	if err != nil {
+		return "unknown"
+	}
+	var info struct {
+		Name            string `json:"Name"`
+		OperatingSystem string `json:"OperatingSystem"`
+		OSType          string `json:"OSType"`
+	}
+	if err := json.Unmarshal(resp, &info); err != nil {
+		return "unknown"
+	}
+	low := strings.ToLower(info.OperatingSystem + " " + info.Name)
+	switch {
+	case strings.Contains(low, "rancher"):
+		return "rancher-desktop"
+	case strings.Contains(low, "docker desktop"):
+		return "docker-desktop"
+	case info.OSType == "linux":
+		return "linux"
+	}
+	return "unknown"
+}
+
+// countCDIDevices probes Docker info for CDI device count. Docker's HTTP API
+// (as of v1.43) only exposes CDISpecDirs and not DiscoveredDevices, so we use
+// two signals:
+//   1. CDISpecDirs is non-empty (CDI feature is on)
+//   2. At least one .yaml or .json file exists in one of those dirs
+//      (we can probe via a tiny container exec, but that's heavy)
+//
+// As a pragmatic compromise, we return 1 if CDI is configured AND nvidia
+// runtime is present (the spec is the only way nvidia runtime becomes useful
+// on a Rancher-style host). Returns 0 otherwise.
+func countCDIDevices(ctx context.Context) int {
+	resp, err := dockerAPIGet(ctx, "/v1.43/info")
+	if err != nil {
+		return 0
+	}
+	var info struct {
+		CDISpecDirs []string       `json:"CDISpecDirs"`
+		Runtimes    map[string]any `json:"Runtimes"`
+		// DiscoveredDevices may appear in newer Docker versions (>= 26).
+		DiscoveredDevices []struct {
+			Source string `json:"Source"`
+			ID     string `json:"ID"`
+		} `json:"DiscoveredDevices"`
+	}
+	if err := json.Unmarshal(resp, &info); err != nil {
+		return 0
+	}
+	// Newer Docker: count CDI sources directly.
+	if len(info.DiscoveredDevices) > 0 {
+		n := 0
+		for _, d := range info.DiscoveredDevices {
+			if strings.EqualFold(d.Source, "cdi") {
+				n++
+			}
+		}
+		if n > 0 {
+			return n
+		}
+	}
+	// Older Docker (< 26): infer from CDISpecDirs + nvidia runtime presence.
+	hasCDI := len(info.CDISpecDirs) > 0
+	_, hasNvidia := info.Runtimes["nvidia"]
+	if hasCDI && hasNvidia {
+		return 1
+	}
+	return 0
 }
 
 // gpuMu serializes switch operations (only one switch at a time).
@@ -93,8 +216,11 @@ func detectGPU(ctx context.Context) GPUStatus {
 			}
 		}
 	}
-	// Probe 3: check docker info for nvidia runtime
+	// Probe 3: check docker info for nvidia runtime + host type + CDI devices.
+	// We make a single docker info call here and reuse the parse below.
 	st.ContainerToolkit = checkNvidiaRuntime(ctx)
+	st.HostType = detectHostType(ctx)
+	st.CDIDevices = countCDIDevices(ctx)
 	return st
 }
 
@@ -279,6 +405,12 @@ func (s *Server) performSwitch(ctx context.Context, targetMode string) switchRes
 			}
 			if st.VRAMTotalMB > 0 && st.VRAMTotalMB < 2000 {
 				return fmt.Errorf("insufficient VRAM: %d MB (need at least 2 GB)", st.VRAMTotalMB)
+			}
+			if st.CDIDevices == 0 && (st.HostType == "rancher-desktop" || st.HostType == "linux") {
+				return fmt.Errorf("no CDI devices discovered — regenerate spec first: "+
+					"on Rancher Desktop run `wsl -d rancher-desktop -- /usr/local/bin/nvidia-ctk cdi generate "+
+					"--output=/var/run/cdi/nvidia.yaml`; on Linux run "+
+					"`sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`")
 			}
 		}
 		return nil

@@ -516,6 +516,7 @@ body{font-family:var(--sans);background:var(--bg-base);color:var(--text-primary)
 .settings-row-value{font-size:12px;color:var(--text-primary)}
 .banner.success{background:rgba(67,160,71,.08);border-color:rgba(67,160,71,.4) !important;color:#7ed084}
 .banner.error{background:rgba(255,92,92,.08);border-color:rgba(255,92,92,.4) !important;color:#ff8c8c}
+.banner.warn{background:rgba(255,193,7,.08);border-color:rgba(255,193,7,.4) !important;color:#ffd54a}
 .switch-steps li{margin:2px 0}
 
 /* === Compare === */
