@@ -47,8 +47,21 @@ func readAll(r io.Reader) ([]byte, error) {
 	return buf, nil
 }
 
+// dockerImageExists checks whether the given image (name:tag) is present in
+// the local docker image store via GET /v1.43/images/{name}/json.
+func dockerImageExists(ctx context.Context, image string) bool {
+	// Docker image inspect endpoint accepts name:tag directly.
+	_, err := dockerAPIGet(ctx, "/v1.43/images/"+image+"/json")
+	return err == nil
+}
+
 // dockerPullImage performs POST /v1.43/images/create?fromImage=...&tag=...
+// If the image already exists locally (typical for locally-built images like
+// bit-rag-embedder:gpu), the pull is skipped.
 func dockerPullImage(ctx context.Context, image string) error {
+	if dockerImageExists(ctx, image) {
+		return nil // already present, skip pull
+	}
 	name, tag := splitImageTag(image)
 	path := fmt.Sprintf("/v1.43/images/create?fromImage=%s&tag=%s", name, tag)
 	body, err := dockerSocketPost(ctx, "/var/run/docker.sock", path, nil)
@@ -117,7 +130,7 @@ func dockerStartEmbedder(ctx context.Context, image string, useGPU bool) error {
 	cr := createReq{
 		Image: image,
 		HostConfig: hostConfig{
-			NetworkMode:   "bit-rag_default",
+			NetworkMode:   "bit-rag-external",
 			RestartPolicy: map[string]any{"Name": "unless-stopped"},
 		},
 	}
