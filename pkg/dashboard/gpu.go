@@ -221,6 +221,19 @@ func detectGPU(ctx context.Context) GPUStatus {
 	st.ContainerToolkit = checkNvidiaRuntime(ctx)
 	st.HostType = detectHostType(ctx)
 	st.CDIDevices = countCDIDevices(ctx)
+
+	// Probe 4: when the dashboard runs inside a container (no nvidia-smi, no
+	// /proc/driver/nvidia mount), but the host has CDI devices + nvidia
+	// runtime registered, we KNOW a GPU is accessible to docker on the host.
+	// Mark Detected=true so the user can switch the embedder to GPU mode.
+	// Name/VRAM/Driver remain empty here — they'll be populated once the GPU
+	// embedder container starts and runs nvidia-smi.
+	if !st.Detected && st.ContainerToolkit && st.CDIDevices > 0 {
+		st.Detected = true
+		if st.Name == "" {
+			st.Name = "GPU available (via CDI)"
+		}
+	}
 	return st
 }
 

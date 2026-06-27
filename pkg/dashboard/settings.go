@@ -75,6 +75,10 @@ func (s *Server) uiSettingsPanel(c echo.Context) error {
 			sb.WriteString("driver " + template.HTMLEscapeString(st.DriverVersion))
 		}
 		sb.WriteString("</div>")
+		// Note when detected via CDI inference (no direct nvidia-smi access)
+		if st.VRAMTotalMB == 0 && st.DriverVersion == "" && st.CDIDevices > 0 {
+			sb.WriteString("<div class='muted small' style='margin-top:6px'>Detected via Docker CDI. Full GPU details will appear once the embedder runs in GPU mode.</div>")
+		}
 	}
 	sb.WriteString("</div></div>")
 
