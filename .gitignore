@@ -4,6 +4,11 @@ vendor/
 # Env / secrets (ADR-0003: never commit .env)
 .env
 *.env.local
+.test-*-key
+
+# Local-only compose overrides (e.g. publish ports for dev curl)
+docker-compose.*override*.local.yml
+docker-compose.override.yml
 
 # Build output
 /bin/

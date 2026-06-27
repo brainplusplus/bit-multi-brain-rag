@@ -181,6 +181,63 @@ Kalau ada `0.0.0.0:6333` atau `0.0.0.0:8080`, BERHENTI — ada port leak. Cek `d
 - **SQLite (dashboard data):** volume `bit-rag-data` di-mount ke `/app/data`. Backup dengan `docker run --rm -v bit-rag-data:/data -v $(pwd):/backup alpine tar czf /backup/dashboard-$(date +%F).tar.gz /data`.
 - **Qdrant (vectors):** volume `qdrant-storage`. Gunakan Qdrant snapshot API (`POST /collections/{name}/snapshots`) atau backup volume langsung.
 
+## Indexing (async, ADR-0005)
+
+Sejak ADR-0005, indexing **TIDAK** lagi blocking HTTP call. `POST /api/v1/index`
+return `202 Accepted` segera + job descriptor JSON; pekerjaan jalan di
+goroutine. UI HTMX dashboard poll status tiap 2 detik secara otomatis.
+
+### Endpoint summary
+
+| Endpoint | Method | Return | Tujuan |
+|---|---|---|---|
+| `/api/v1/index` | POST | **202** + `{id, status, project, ...}` | Enqueue indexing (idempotent per project) |
+| `/api/v1/index/status?project=X` | GET | 200 + live Job JSON | Poll progress / final state |
+| `/api/v1/index/cancel` | POST | 200 + `{status: cancel signalled}` | Stop running job |
+| `/ui/index` | POST (form) | 202 + HTMX partial | UI button (self-polling) |
+| `/ui/index/status?project=X` | GET | HTMX partial | UI poll target (every 2s) |
+| `/ui/index/cancel` | POST (form) | 200 + HTMX partial | UI Cancel button |
+
+### Polling flow (curl example)
+
+```bash
+# 1. enqueue
+curl -X POST https://dashboard.example.com/api/v1/index \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"project":"my-repo"}'
+# → 202 {"id":"...","status":"queued",...}
+
+# 2. poll every few seconds
+while true; do
+  curl -s "https://dashboard.example.com/api/v1/index/status?project=my-repo" \
+       -H "Authorization: Bearer $KEY" | jq '{status, files_done, files_total, indexed_done}'
+  sleep 5
+done
+# → {"status":"running","files_done":3,"files_total":20,"indexed_done":40}
+# → {"status":"running","files_done":11,...}
+# → {"status":"succeeded","files_done":20,"files_total":20,"indexed_done":236}
+
+# 3. (optional) cancel mid-flight
+curl -X POST https://dashboard.example.com/api/v1/index/cancel \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"project":"my-repo"}'
+```
+
+### Concurrency
+
+- **Per-project lock**: 2× POST /api/v1/index untuk project sama → same job ID
+  dikembalikan (idempotent), tidak ada duplikasi work.
+- Project berbeda → jalan paralel (sharing embedder, throughput tergantung
+  beban llama.cpp).
+
+### Restart recovery
+
+Kalau container dashboard restart saat indexing berjalan, job orphan otomatis
+di-flip ke status `interrupted` di startup. UI menampilkan pesan "Click
+Re-index to retry" daripada spinner palsu.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -190,6 +247,8 @@ Kalau ada `0.0.0.0:6333` atau `0.0.0.0:8080`, BERHENTI — ada port leak. Cek `d
 | embedder takes >2 min to start | model load (372 MB) saat first boot | normal, lihat `start_period: 120s` di healthcheck |
 | recall sangat rendah (<10%) | pooling salah (default cls, harus mean) | confirm `--pooling mean` di embedder Dockerfile (sudah benar di repo ini) |
 | dashboard:8081 timeout dari Easypanel | container healthcheck failing | cek `docker logs bit-rag-dashboard` |
+| status="interrupted" di UI setelah deploy baru | container restart sementara job aktif | normal recovery behavior; klik Re-index untuk retry |
+| POST /api/v1/index returns 503 "indexer unavailable" | embedder atau qdrant offline | cek health kedua service: `docker ps`, `curl :8080/healthz` |
 
 ## MCP server
 

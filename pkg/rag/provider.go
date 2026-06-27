@@ -31,6 +31,41 @@ type Result struct {
 	Meta    map[string]string
 }
 
+// Point is a stored chunk projection without a relevance score. Returned by
+// Scroll and GetPoint where similarity is not the question — used by the
+// chunks browser (ADR-0006) for inspect/audit workflows.
+type Point struct {
+	ID      string
+	Content string
+	Meta    map[string]string
+}
+
+// ScrollOpts configures a paginated listing of a collection's points.
+//
+// Offset is an opaque cursor returned by the previous Scroll call; empty
+// requests the first page. Filter is a raw Qdrant filter expression passed
+// through (e.g. {"must":[{"key":"language","match":{"value":"go"}}]})
+// — callers build it; the provider does not parse.
+type ScrollOpts struct {
+	Offset string
+	Limit  int
+	Filter map[string]any
+}
+
+// ScrollResult is one page of points + the cursor for the next page.
+// NextOffset is empty when no more pages remain.
+type ScrollResult struct {
+	Points     []Point
+	NextOffset string
+}
+
+// CollectionInfo summarises a collection's vital signs for UI display.
+type CollectionInfo struct {
+	Status      string // e.g. "green"
+	PointsCount int
+	VectorsSize int
+}
+
 // PointInfo is a stored point's ID + source_file metadata (for delta sync).
 type PointInfo struct {
 	ID         string
@@ -78,6 +113,21 @@ type Provider interface {
 	// ListPoints returns all points (ID + source_file) in the collection,
 	// optionally filtered by metadata. Used for delta sync (stale detection).
 	ListPoints(ctx context.Context, key CollectionKey, metaFilter map[string]string) ([]PointInfo, error)
+
+	// Scroll returns one page of points from the collection. The caller passes
+	// the previous call's NextOffset to advance. Optional filter is a raw
+	// Qdrant filter expression. Used by the chunks browser (ADR-0006).
+	Scroll(ctx context.Context, key CollectionKey, opts ScrollOpts) (ScrollResult, error)
+
+	// GetPoint returns a single point by ID, or an error if missing.
+	GetPoint(ctx context.Context, key CollectionKey, pointID string) (Point, error)
+
+	// CollectionInfo returns the collection's point count and vector size.
+	// Returns an error if the collection doesn't exist.
+	CollectionInfo(ctx context.Context, key CollectionKey) (CollectionInfo, error)
+
+	// Ping checks connectivity to the vector store backend.
+	Ping(ctx context.Context) error
 
 	// Close releases resources.
 	Close() error

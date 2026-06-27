@@ -2,7 +2,8 @@
 //
 // Uses Qdrant REST API (port 6333) via net/http, no SDK dependency.
 // Collection naming follows CollectionKey.String():
-//   {project}_{domain}_{model}_{dim}_{backend}
+//
+//	{project}_{domain}_{model}_{dim}_{backend}
 package rag
 
 import (
@@ -118,10 +119,18 @@ func (q *QdrantClient) Index(ctx context.Context, key CollectionKey, docs []Docu
 	}
 	points := make([]map[string]any, 0, len(docs))
 	for i, doc := range docs {
+		// Merge doc.Meta + doc.Content into a single payload. We store the
+		// raw chunk content under "content" so the search path can return it
+		// (otherwise UI / MCP would only show file path + score, never code).
+		payload := make(map[string]any, len(doc.Meta)+1)
+		for k, v := range doc.Meta {
+			payload[k] = v
+		}
+		payload["content"] = doc.Content
 		points = append(points, map[string]any{
 			"id":      doc.ID,
 			"vector":  vectors[i],
-			"payload": doc.Meta,
+			"payload": payload,
 		})
 	}
 	body := map[string]any{
@@ -146,8 +155,8 @@ func (q *QdrantClient) SemanticSearch(ctx context.Context, key CollectionKey, qu
 		limit = 5
 	}
 	body := map[string]any{
-		"vector":  queryVec,
-		"limit":   limit,
+		"vector":       queryVec,
+		"limit":        limit,
 		"with_payload": true,
 	}
 	data, _, err := q.do(ctx, "POST", "/collections/"+key.String()+"/points/search", body)
@@ -198,7 +207,7 @@ func (q *QdrantClient) ListPoints(ctx context.Context, key CollectionKey, metaFi
 	var offset any
 	for {
 		body := map[string]any{
-			"limit":       256,
+			"limit":        256,
 			"with_payload": true,
 		}
 		if offset != nil {
@@ -208,7 +217,7 @@ func (q *QdrantClient) ListPoints(ctx context.Context, key CollectionKey, metaFi
 			must := []map[string]any{}
 			for k, v := range metaFilter {
 				must = append(must, map[string]any{
-					"key": k,
+					"key":   k,
 					"match": map[string]any{"value": v},
 				})
 			}
@@ -235,6 +244,121 @@ func (q *QdrantClient) ListPoints(ctx context.Context, key CollectionKey, metaFi
 		offset = sr.Result.NextPage
 	}
 	return out, nil
+}
+
+// Scroll returns one page of points (with payload, no vectors) for the
+// chunks browser. The offset cursor is opaque — pass NextOffset from the
+// previous call to advance. See ADR-0006.
+func (q *QdrantClient) Scroll(ctx context.Context, key CollectionKey, opts ScrollOpts) (ScrollResult, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	body := map[string]any{
+		"limit":        limit,
+		"with_payload": true,
+		"with_vector":  false,
+	}
+	if opts.Offset != "" {
+		body["offset"] = opts.Offset
+	}
+	if opts.Filter != nil {
+		body["filter"] = opts.Filter
+	}
+	data, _, err := q.do(ctx, "POST", "/collections/"+key.String()+"/points/scroll", body)
+	if err != nil {
+		return ScrollResult{}, err
+	}
+	var sr scrollResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		return ScrollResult{}, fmt.Errorf("unmarshal scroll: %w", err)
+	}
+	out := ScrollResult{Points: make([]Point, 0, len(sr.Result.Points))}
+	for _, p := range sr.Result.Points {
+		meta := make(map[string]string, len(p.Payload))
+		var content string
+		for k, v := range p.Payload {
+			s := fmt.Sprintf("%v", v)
+			meta[k] = s
+			if k == "content" {
+				content = s
+			}
+		}
+		out.Points = append(out.Points, Point{
+			ID:      fmt.Sprintf("%v", p.ID),
+			Content: content,
+			Meta:    meta,
+		})
+	}
+	if sr.Result.NextPage != nil {
+		out.NextOffset = fmt.Sprintf("%v", sr.Result.NextPage)
+	}
+	return out, nil
+}
+
+// GetPoint fetches a single point by its ID (UUID v5 string).
+// Returns an error wrapping the HTTP status code if not found.
+func (q *QdrantClient) GetPoint(ctx context.Context, key CollectionKey, pointID string) (Point, error) {
+	data, _, err := q.do(ctx, "GET", "/collections/"+key.String()+"/points/"+pointID, nil)
+	if err != nil {
+		return Point{}, err
+	}
+	var resp struct {
+		Result struct {
+			ID      any            `json:"id"`
+			Payload map[string]any `json:"payload"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return Point{}, fmt.Errorf("unmarshal point: %w", err)
+	}
+	meta := make(map[string]string, len(resp.Result.Payload))
+	var content string
+	for k, v := range resp.Result.Payload {
+		s := fmt.Sprintf("%v", v)
+		meta[k] = s
+		if k == "content" {
+			content = s
+		}
+	}
+	return Point{
+		ID:      fmt.Sprintf("%v", resp.Result.ID),
+		Content: content,
+		Meta:    meta,
+	}, nil
+}
+
+// CollectionInfo fetches the collection's vital signs (status, point count,
+// vector size) from Qdrant's /collections/{name} endpoint.
+func (q *QdrantClient) CollectionInfo(ctx context.Context, key CollectionKey) (CollectionInfo, error) {
+	data, _, err := q.do(ctx, "GET", "/collections/"+key.String(), nil)
+	if err != nil {
+		return CollectionInfo{}, err
+	}
+	var resp struct {
+		Result struct {
+			Status      string `json:"status"`
+			PointsCount int    `json:"points_count"`
+			Config      struct {
+				Params struct {
+					Vectors struct {
+						Size int `json:"size"`
+					} `json:"vectors"`
+				} `json:"params"`
+			} `json:"config"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return CollectionInfo{}, fmt.Errorf("unmarshal collection info: %w", err)
+	}
+	return CollectionInfo{
+		Status:      resp.Result.Status,
+		PointsCount: resp.Result.PointsCount,
+		VectorsSize: resp.Result.Config.Params.Vectors.Size,
+	}, nil
 }
 
 // --- helpers ---

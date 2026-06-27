@@ -4,19 +4,37 @@
 # Source: poc-cocoindex/docker-voyage-nano/Dockerfile (sudah diverifikasi:
 #   --pooling mean fix, LD_LIBRARY_PATH fix, bake-in model).
 #
-# Build:  docker build -f docker/embedder/Dockerfile -t bit-rag-embedder:latest docker/embedder
-# Run:    docker run --rm -p 8080:8080 -e LLAMA_API_KEY=secret bit-rag-embedder:latest
+# Dual CPU/GPU build via ARG:
+#   --build-arg BASE_IMAGE=ghcr.io/ggml-org/llama.cpp:server          (CPU)
+#   --build-arg BASE_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda     (NVIDIA GPU)
+#   --build-arg N_GPU_LAYERS=99   (only meaningful for GPU; 0 = pure CPU)
+#
+# Build CPU:  docker build -f docker/embedder/Dockerfile -t bit-rag-embedder:cpu docker/embedder
+# Build GPU:  docker build -f docker/embedder/Dockerfile \
+#               --build-arg BASE_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda \
+#               --build-arg N_GPU_LAYERS=99 \
+#               -t bit-rag-embedder:gpu docker/embedder
+#
+# Run CPU:   docker run --rm -p 8080:8080 bit-rag-embedder:cpu
+# Run GPU:   docker run --rm --gpus all -p 8080:8080 bit-rag-embedder:gpu
 #
 # Notes:
-#   - Model di-bake ke image (372MB extra, image total ~1GB). Trade-off:
-#     deploy sekali langsung jalan, tanpa volume mount untuk model.
+#   - Model di-bake ke image (372MB extra, image total ~1GB CPU / ~2.5GB GPU).
 #   - --pooling mean WAJIB untuk voyage-4-nano (default cls bikin recall salah).
+#   - --ctx-size 32768 cocok voyage-4-nano hard cap (effective chunk dipotong
+#     di indexer pakai EffectiveChunkTokens()).
+#   - --n-gpu-layers 0 di base CPU image → llama.cpp ignore; di CUDA image
+#     dengan N_GPU_LAYERS=99 → offload semua layer ke GPU.
 # =============================================================================
 
-FROM ghcr.io/ggml-org/llama.cpp:server
+ARG BASE_IMAGE=ghcr.io/ggml-org/llama.cpp:server
+FROM ${BASE_IMAGE}
+
+# Default 0 = no GPU offload. Overridden via --build-arg for GPU image.
+ARG N_GPU_LAYERS=0
+ENV N_GPU_LAYERS=${N_GPU_LAYERS}
 
 # FIX: libllama-server-impl.so ada di /app, bukan di ld.so default search path.
-# Tanpa ini, llama-server gagal load: "cannot open shared object file".
 ENV LD_LIBRARY_PATH=/app
 
 # Bake model ke image (saat build time).
@@ -31,22 +49,21 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Hanya expose port internal embedding. Di docker-compose tidak di-publish
-# ke host (akses cuma dari dashboard via network internal).
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
   CMD curl -f http://localhost:8080/health || exit 1
 
-# Flags voyage-4-nano (lihat poc-cocoindex/docker-voyage-nano/Dockerfile untuk
-# justifikasi tiap flag).
-ENTRYPOINT ["/app/llama-server"]
-CMD ["--model", "/models/voyage-4-nano-q8_0.gguf", \
-     "--embedding", \
-     "--no-webui", \
-     "--pooling", "mean", \
-     "--port", "8080", \
-     "--ctx-size", "8192", \
-     "--threads", "-1", \
-     "--parallel", "4", \
-     "--cont-batching"]
+# Use shell-form to expand $N_GPU_LAYERS. Flags voyage-4-nano:
+ENTRYPOINT ["/bin/sh", "-c", "exec /app/llama-server \
+    --model /models/voyage-4-nano-q8_0.gguf \
+    --embedding \
+    --no-webui \
+    --pooling mean \
+    --port 8080 \
+    --host 0.0.0.0 \
+    --ctx-size 32768 \
+    --threads -1 \
+    --parallel 4 \
+    --cont-batching \
+    --n-gpu-layers ${N_GPU_LAYERS}"]

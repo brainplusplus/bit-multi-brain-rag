@@ -45,9 +45,18 @@ func Open(dbPath string) (*Store, error) {
 	db.SetMaxIdleConns(1)
 
 	s := &Store{db: db}
-	if err := s.migrate(context.Background()); err != nil {
+	ctx := context.Background()
+	if err := s.migrate(ctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
+		return nil, fmt.Errorf("migrate projects: %w", err)
+	}
+	if err := s.migrateJobs(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate jobs: %w", err)
+	}
+	if err := s.migrateModels(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate models: %w", err)
 	}
 	return s, nil
 }

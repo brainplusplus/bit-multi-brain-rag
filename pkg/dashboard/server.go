@@ -21,6 +21,7 @@ import (
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/chunker"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/config"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/indexer"
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/jobs"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/store"
 	"github.com/labstack/echo/v4"
@@ -37,6 +38,7 @@ type Server struct {
 	embed   rag.EmbeddingClient // llama.cpp embedder
 	chunker *chunker.Chunker
 	indexer *indexer.Indexer
+	jobs    *jobs.Manager // background index job orchestrator (ADR-0005)
 }
 
 // New constructs a dashboard server with the given config.
@@ -72,8 +74,24 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		Timeout:  time.Duration(cfg.EmbeddingTimeoutS) * time.Second,
 	})
 
+	// Seed default model in registry if empty (first boot).
+	if err := st.SeedDefaultModel(context.Background(), cfg.EmbeddingEndpoint, cfg.EmbeddingAPIKey); err != nil {
+		logger.Warn("failed to seed default model", "error", err)
+	}
+
 	chk := chunker.New()
 	idx := indexer.New(chk, emb, qc, logger)
+	// Apply per-model chunk size from the active registry entry.
+	if activeModel, err := st.GetActiveModel(context.Background()); err == nil {
+		idx.MaxTokensPerChunk = activeModel.EffectiveChunkTokens()
+		logger.Info("initial chunk size from active model",
+			"model", activeModel.ModelName,
+			"chunk_tokens", idx.MaxTokensPerChunk,
+		)
+	}
+	// Background job manager: per-project locking, in-memory live progress,
+	// SQLite-persisted final state, startup recovery for orphan jobs.
+	jobMgr := jobs.NewManager(st, idx, logger)
 
 	s := &Server{
 		cfg:     cfg,
@@ -83,6 +101,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		embed:   emb,
 		chunker: chk,
 		indexer: idx,
+		jobs:    jobMgr,
 	}
 
 	e := echo.New()
@@ -104,16 +123,46 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	api.POST("/projects", s.createProject)
 	api.GET("/projects/:id", s.getProject)
 	api.DELETE("/projects/:id", s.deleteProject)
-	api.POST("/search", s.search)  // POST /api/v1/search
-	api.POST("/index", s.indexAPI) // POST /api/v1/index — trigger indexing
+	api.POST("/search", s.search)               // POST /api/v1/search
+	api.POST("/index", s.indexAPI)              // POST /api/v1/index — enqueue (returns 202)
+	api.GET("/index/status", s.indexStatusAPI)  // GET  /api/v1/index/status?project=X
+	api.POST("/index/cancel", s.indexCancelAPI) // POST /api/v1/index/cancel
+	api.GET("/models", s.apiListModels)              // GET  /api/v1/models
+	api.POST("/models", s.apiCreateModel)            // POST /api/v1/models
+	api.PATCH("/models/:id", s.apiUpdateModel)       // PATCH /api/v1/models/:id
+	api.DELETE("/models/:id", s.apiDeleteModel)      // DELETE /api/v1/models/:id
+	api.POST("/models/active", s.apiSetActiveModel)  // POST /api/v1/models/active
+	api.POST("/compare", s.apiCompare)               // POST /api/v1/compare
+	api.GET("/health", s.apiHealth)                  // GET  /api/v1/health
+	api.GET("/providers", s.apiProviders)            // GET  /api/v1/providers — registry
+	api.GET("/providers/:id/models", s.apiProviderModels) // GET  /api/v1/providers/:id/models?refresh=1
+	api.GET("/gpu/status", s.apiGPUStatus)            // GET  /api/v1/gpu/status — detection
+	api.POST("/gpu/switch", s.apiGPUSwitch)           // POST /api/v1/gpu/switch — switch to gpu|cpu
 
 	// --- Web UI ---
 	e.GET("/", s.uiIndex)
-	e.GET("/ui/projects", s.uiProjectList)       // HTMX partial: sidebar list
-	e.GET("/ui/projects/:id", s.uiProjectDetail) // HTMX partial: project detail
-	e.POST("/ui/projects", s.uiCreateProject)    // HTMX partial: create + refresh list
-	e.GET("/ui/search", s.uiSearch)              // HTMX partial: search results
-	e.POST("/ui/index", s.uiRunIndex)             // HTMX partial: trigger indexing + show stats
+	e.GET("/ui/health", s.uiHealth)                            // HTMX partial: health widget (polled 30s)
+	e.GET("/ui/models", s.uiModelsPanel)                       // HTMX partial: model management panel
+	e.GET("/ui/models/new", s.uiNewModelForm)                  // HTMX partial: 2-step wizard
+	e.GET("/ui/models/:id/edit", s.uiEditModelForm)            // HTMX partial: edit existing model
+	e.POST("/ui/models", s.uiCreateModel)                      // HTMX partial: add model
+	e.POST("/ui/models/:id", s.uiUpdateModel)                  // HTMX partial: patch model
+	e.GET("/ui/providers/:id/models", s.uiProviderModelOptions) // HTMX partial: <option> list for model picker
+	e.POST("/ui/models/active", s.uiSetActiveModel)            // HTMX partial: switch active model
+	e.POST("/ui/models/:id/delete", s.uiDeleteModel)           // HTMX partial: delete model
+	e.POST("/ui/compare", s.uiCompare)                         // HTMX partial: comparison results
+	e.GET("/ui/settings", s.uiSettingsPanel)                   // HTMX partial: settings page (GPU, runtimes)
+	e.POST("/ui/settings/gpu/switch", s.uiGPUSwitch)           // HTMX partial: trigger GPU/CPU switch
+	e.GET("/ui/projects", s.uiProjectList)                     // HTMX partial: sidebar list
+	e.GET("/ui/projects/:id", s.uiProjectDetail)               // HTMX partial: project detail
+	e.GET("/ui/projects/:id/chunks", s.uiChunksPanel)          // HTMX partial: chunks browser panel
+	e.GET("/ui/projects/:id/chunks/table", s.uiChunksTable)    // HTMX partial: chunks table/filter result
+	e.GET("/ui/projects/:id/chunks/:pointID", s.uiChunkDetail) // HTMX partial: chunk side-panel detail
+	e.POST("/ui/projects", s.uiCreateProject)                  // HTMX partial: create + refresh list
+	e.GET("/ui/search", s.uiSearch)                            // HTMX partial: search results
+	e.POST("/ui/index", s.uiRunIndex)                          // HTMX partial: enqueue indexing + live status
+	e.GET("/ui/index/status", s.uiJobStatus)                   // HTMX partial: poll job state (every 2s)
+	e.POST("/ui/index/cancel", s.uiCancelIndex)                // HTMX partial: cancel running job
 
 	return s, nil
 }
@@ -122,6 +171,10 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 func (s *Server) ListenAndServe() error {
 	s.logger.Info("dashboard starting", "addr", s.cfg.HTTPAddr)
 	s.echo.Server.Addr = s.cfg.HTTPAddr
+	// All HTTP handlers complete in well under 1s now that indexing is
+	// asynchronous (ADR-0005): /api/v1/index returns 202 immediately, and the
+	// HTMX UI polls /ui/index/status. A short WriteTimeout protects against
+	// slow-client / pipelining issues.
 	s.echo.Server.ReadHeaderTimeout = 10 * time.Second
 	s.echo.Server.ReadTimeout = 30 * time.Second
 	s.echo.Server.WriteTimeout = 30 * time.Second
