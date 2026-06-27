@@ -1,0 +1,58 @@
+# .dockerignore
+#
+# Files yang TIDAK dibawa ke Docker build context.
+# Critical: jangan copy data sensitif (.env), binary lokal, atau IDE files.
+
+# --- Build artifacts ---
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# --- Data / state ---
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Git ---
+.git/
+.gitignore
+
+# --- Docs (tidak dibutuhkan di runtime image) ---
+docs/
+*.md
+!README.md
+
+# --- Coverage ---
+coverage.out
+coverage.html
+
+# NOTE: kita JANGAN exclude *_test.go karena `go build` skip mereka otomatis,
+# dan kalau di-exclude, test paket internal masih bisa break referensi.
+#
+# JANGAN exclude `docker/` karena docker-compose embedder pakai context
+# `./docker/embedder/` (kalau di-ignore, build context kosong).
+#
+# JANGAN exclude `Dockerfile` / `docker-compose*.yml` — Docker engine tidak
+# perlu mereka di build context, tapi exclusion di sini tidak salah; tetap
+# kita biarkan included agar tidak misleading.
+
+# --- Logs ---
+*.log
+logs/

@@ -1,0 +1,87 @@
+# =============================================================================
+# docker-compose.qdrant.yml — Qdrant vector store (STANDALONE).
+#
+# Deploy ini DULU di Easypanel, sebelum docker-compose.yml utama.
+# Pakai compose terpisah supaya:
+#   - Qdrant bisa di-upgrade/restart tanpa nge-down dashboard
+#   - Backup volume Qdrant independen
+#   - Bit-rag stack lain bisa share Qdrant yang sama (multi-project)
+#
+# Port exposure policy:
+#   - Qdrant REST (:6333) → INTERNAL ONLY (via bit-rag-external network)
+#                            JANGAN publish ke host kecuali butuh debug.
+#   - Qdrant gRPC (:6334) → INTERNAL ONLY (sama)
+#
+# Usage di Easypanel:
+#   1. Create service → upload compose file ini
+#   2. Set QDRANT__SERVICE__API_KEY di env Easypanel (REQUIRED untuk production)
+#   3. Deploy
+#   4. Lalu deploy bit-rag (docker-compose.yml) — dashboard akan resolve
+#      "qdrant" via network bit-rag-external
+#
+# Local dev:
+#   docker network create bit-rag-external  # sekali aja
+#   docker compose -f docker-compose.qdrant.yml up -d
+# =============================================================================
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.15.0
+    container_name: bit-rag-qdrant
+    restart: unless-stopped
+
+    environment:
+      # Production: WAJIB set API key. Tanpa ini, Qdrant terbuka tanpa auth.
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY}"
+
+      # Tuning ringan: HNSW cocok untuk small-medium dataset (<10M vectors).
+      # Lihat Qdrant docs untuk dataset besar.
+      QDRANT__LOG_LEVEL: "INFO"
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+      QDRANT__SERVICE__HTTP_PORT: "6333"
+
+    volumes:
+      # Storage data Qdrant (vector + index + metadata). MUST be persistent.
+      - qdrant-storage:/qdrant/storage
+
+      # Snapshot dir (optional): Qdrant bisa export snapshot ke sini.
+      # Mount ke volume terpisah supaya backup gampang (rsync, S3, dll).
+      - qdrant-snapshots:/qdrant/snapshots
+
+    # TIDAK ADA `ports:` di sini → Qdrant TIDAK di-expose ke host/internet.
+    # Akses hanya dari bit-rag-external network.
+    #
+    # Kalau perlu debug dari host LOCAL ONLY, uncomment + bind ke loopback:
+    # ports:
+    #   - "127.0.0.1:6333:6333"
+    #   - "127.0.0.1:6334:6334"
+
+    networks:
+      - bit-rag-external
+
+    healthcheck:
+      # Qdrant 1.15+ punya /healthz. Untuk versi lama pakai / (returns 200).
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || wget -qO- http://localhost:6333/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  # Network bersama untuk Qdrant + bit-rag dashboard.
+  # External: dibuat sekali di luar compose (lihat README/DEPLOY).
+  bit-rag-external:
+    external: true
+    name: bit-rag-external
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
+volumes:
+  qdrant-storage:
+    driver: local
+  qdrant-snapshots:
+    driver: local

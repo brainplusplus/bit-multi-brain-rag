@@ -1,0 +1,151 @@
+# =============================================================================
+# docker-compose.yml — bit-multi-brain-rag stack (DASHBOARD + EMBEDDER).
+#
+# Untuk Easypanel: deploy ini sebagai 1 project. Easypanel reverse-proxy
+# domain user ke service `dashboard` port 8081.
+#
+# Port exposure policy:
+#   - dashboard :8081 → di-publish ke Easypanel (akses publik via domain)
+#   - embedder :8080  → INTERNAL ONLY (cuma dashboard yang bisa akses,
+#                       via service name "embedder" di network bit-rag-net)
+#   - Qdrant tidak di sini → deploy terpisah pakai docker-compose.qdrant.yml,
+#                            akses via env QDRANT_URL.
+#
+# Prereqs:
+#   1. Qdrant sudah running di Easypanel (deploy docker-compose.qdrant.yml dulu)
+#   2. .env file di-set dengan DASHBOARD_API_KEYS, LLAMA_API_KEY, QDRANT_URL
+#
+# Usage:
+#   cp .env.example .env  # lalu edit
+#   docker compose up -d --build
+#
+# Easypanel will:
+#   - Read this file
+#   - Build dashboard from ./Dockerfile (root)
+#   - Build embedder from ./docker/embedder/Dockerfile
+#   - Wire network internal
+#   - Only expose dashboard:8081 to user's domain
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Dashboard: HTTP service, public-facing (via Easypanel reverse proxy).
+  # Stateful: SQLite + project data di volume.
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bit-rag-dashboard:latest
+    container_name: bit-rag-dashboard
+    restart: unless-stopped
+
+    environment:
+      # --- Server ---
+      HTTP_ADDR: ":8081"
+      ENVIRONMENT: "production"
+
+      # --- Auth (REQUIRED in production; ADR-0003) ---
+      # Comma-separated list. Set in .env, NEVER commit secrets.
+      DASHBOARD_API_KEYS: "${DASHBOARD_API_KEYS}"
+
+      # --- Embedding (internal: pakai service name "embedder") ---
+      EMBEDDING_ENDPOINT: "http://embedder:8080"
+      EMBEDDING_MODEL: "voyage-4-nano"
+      EMBEDDING_DIM: "1024"
+      EMBEDDING_POOLING: "mean"
+      EMBEDDING_API_KEY: "${LLAMA_API_KEY}"
+      EMBEDDING_TIMEOUT_S: "30"
+
+      # --- Qdrant (external service, deployed via docker-compose.qdrant.yml) ---
+      QDRANT_URL: "${QDRANT_URL}"
+      QDRANT_API_KEY: "${QDRANT_API_KEY:-}"
+
+      # --- SQLite (mounted volume) ---
+      DB_PATH: "/app/data/dashboard.db"
+
+      # --- Active backend identifier (ADR-0001) ---
+      ACTIVE_MODEL: "voyage_nano_1024"
+      ACTIVE_BACKEND: "llama_q8"
+
+      # --- MCP ---
+      # MCP di-run separately via stdio (bukan service Easypanel).
+      MCP_ENABLED: "false"
+
+    # Hanya port HTTP yang di-publish. Easypanel akan reverse-proxy
+    # custom domain → service ini.
+    ports:
+      - "8081:8081"
+
+    volumes:
+      # Persist SQLite + project metadata across container restart.
+      - bit-rag-data:/app/data
+
+    networks:
+      - bit-rag-net
+      - bit-rag-external  # untuk akses Qdrant di compose lain
+
+    depends_on:
+      embedder:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Embedder: llama.cpp Q8 voyage-4-nano. INTERNAL ONLY (no published ports).
+  # Tidak ada `ports:` block → tidak bisa diakses dari luar Docker.
+  # ---------------------------------------------------------------------------
+  embedder:
+    build:
+      context: ./docker/embedder
+      dockerfile: Dockerfile
+    image: bit-rag-embedder:latest
+    container_name: bit-rag-embedder
+    restart: unless-stopped
+
+    environment:
+      # llama-server auto-detect env LLAMA_API_KEY (built-in di base image).
+      LLAMA_API_KEY: "${LLAMA_API_KEY}"
+
+    # NO `ports:` here. Embedder hanya akses-able via service name "embedder"
+    # dari container lain di network bit-rag-net.
+    # Kalau mau debug dari host, uncomment block di bawah (HANYA untuk debug):
+    # ports:
+    #   - "127.0.0.1:8080:8080"   # bind ke loopback only, BUKAN 0.0.0.0
+
+    networks:
+      - bit-rag-net
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s  # bake-in model: butuh waktu load saat first boot
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  # Internal: dashboard ↔ embedder. Tidak exposed ke luar Docker.
+  bit-rag-net:
+    driver: bridge
+
+  # External: untuk konek ke Qdrant di compose terpisah.
+  # Di Easypanel, Qdrant compose juga harus pakai network ini (atau pakai
+  # Easypanel internal DNS untuk cross-service discovery).
+  bit-rag-external:
+    external: true
+    name: bit-rag-external
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
+volumes:
+  bit-rag-data:
+    driver: local

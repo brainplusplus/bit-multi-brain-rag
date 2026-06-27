@@ -1,0 +1,37 @@
+# Dependencies
+vendor/
+
+# Env / secrets (ADR-0003: never commit .env)
+.env
+*.env.local
+
+# Build output
+/bin/
+*.exe
+bit-multi-brain-rag
+bit-multi-brain-rag.exe
+
+# Runtime data (SQLite DBs, logs, indexed projects)
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal
+/data/*.log
+/data/projects/
+!/data/sample_dataset.json
+
+# Test / coverage
+*.out
+coverage.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go workspace (optional, local only)
+go.work
+go.work.sum

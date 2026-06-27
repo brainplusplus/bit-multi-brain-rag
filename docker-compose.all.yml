@@ -1,0 +1,191 @@
+# =============================================================================
+# docker-compose.all.yml — bit-multi-brain-rag ALL-IN-ONE STACK
+#
+# 3 service dalam 1 compose: dashboard + embedder + qdrant.
+# 1-stop deploy di Easypanel: tinggal upload file ini + set env, done.
+#
+# Trade-off vs split compose (docker-compose.yml + docker-compose.qdrant.yml):
+#   PRO : Lebih simpel, 1 deploy, internal DNS otomatis (tanpa external network).
+#         Qdrant cuma akses-able dari service lain di compose ini.
+#   CON : Upgrade Qdrant berarti restart seluruh stack (termasuk dashboard).
+#         Tidak bisa share Qdrant dengan project lain.
+#
+# Pilih ini kalau:
+#   - Single-tenant, 1 project bit-rag aja
+#   - Mau deploy paling sederhana
+#
+# Pilih split (docker-compose.yml + docker-compose.qdrant.yml) kalau:
+#   - Multi-tenant / multi-project share Qdrant
+#   - Butuh upgrade Qdrant independen dari dashboard
+#
+# Port exposure policy (SAMA dengan split version):
+#   ✅ dashboard :8081 → di-publish ke host (Easypanel reverse proxy)
+#   ❌ embedder  :8080 → INTERNAL ONLY
+#   ❌ qdrant    :6333 → INTERNAL ONLY
+#   ❌ qdrant    :6334 → INTERNAL ONLY
+#
+# Usage:
+#   cp .env.example .env   # edit & isi secrets
+#   docker compose -f docker-compose.all.yml up -d --build
+#
+# Easypanel:
+#   - Create project → Compose service → upload `docker-compose.all.yml`
+#   - Set env vars: DASHBOARD_API_KEYS, LLAMA_API_KEY, QDRANT_API_KEY
+#   - Deploy. Easypanel akan auto-detect dashboard:8081 dan tawarkan domain mapping.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1) Qdrant — vector store. INTERNAL ONLY.
+  # Boot dulu (depended on by dashboard).
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.15.0
+    container_name: bit-rag-qdrant
+    restart: unless-stopped
+
+    environment:
+      # Production: WAJIB set API key. Tanpa ini, Qdrant terbuka tanpa auth.
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY}"
+      QDRANT__LOG_LEVEL: "INFO"
+      QDRANT__SERVICE__HTTP_PORT: "6333"
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+
+    volumes:
+      - qdrant-storage:/qdrant/storage
+      - qdrant-snapshots:/qdrant/snapshots
+
+    # TIDAK ADA `ports:` block → Qdrant TIDAK di-expose ke host/internet.
+    # Akses hanya dari service lain di compose ini (via DNS internal "qdrant").
+    #
+    # Untuk debug LOKAL aja (jangan production), uncomment:
+    # ports:
+    #   - "127.0.0.1:6333:6333"
+    #   - "127.0.0.1:6334:6334"
+
+    networks:
+      - bit-rag-net
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || wget -qO- http://localhost:6333/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # 2) Embedder — llama.cpp Q8 voyage-4-nano. INTERNAL ONLY.
+  # Bake-in model (372 MB), first boot ~30-60 detik (model load).
+  # ---------------------------------------------------------------------------
+  embedder:
+    build:
+      context: ./docker/embedder
+      dockerfile: Dockerfile
+    image: bit-rag-embedder:latest
+    container_name: bit-rag-embedder
+    restart: unless-stopped
+
+    environment:
+      # llama-server auto-read env LLAMA_API_KEY (built-in di base image).
+      LLAMA_API_KEY: "${LLAMA_API_KEY}"
+
+    # TIDAK ADA `ports:` block. Cuma akses-able dari service lain di compose ini.
+    # Untuk debug LOKAL: uncomment dengan bind loopback (BUKAN 0.0.0.0).
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+
+    networks:
+      - bit-rag-net
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s   # bake-in model load butuh waktu first boot
+
+  # ---------------------------------------------------------------------------
+  # 3) Dashboard — public-facing HTTP service. Stateful (SQLite).
+  # SATU-SATUNYA service yang di-publish ke host.
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bit-rag-dashboard:latest
+    container_name: bit-rag-dashboard
+    restart: unless-stopped
+
+    environment:
+      # --- Server ---
+      HTTP_ADDR: ":8081"
+      ENVIRONMENT: "production"
+
+      # --- Auth (ADR-0003) ---
+      DASHBOARD_API_KEYS: "${DASHBOARD_API_KEYS}"
+
+      # --- Embedding (internal: service name "embedder") ---
+      EMBEDDING_ENDPOINT: "http://embedder:8080"
+      EMBEDDING_MODEL: "voyage-4-nano"
+      EMBEDDING_DIM: "1024"
+      EMBEDDING_POOLING: "mean"
+      EMBEDDING_API_KEY: "${LLAMA_API_KEY}"
+      EMBEDDING_TIMEOUT_S: "30"
+
+      # --- Qdrant (internal: service name "qdrant") ---
+      QDRANT_URL: "http://qdrant:6333"
+      QDRANT_API_KEY: "${QDRANT_API_KEY}"
+
+      # --- SQLite (volume) ---
+      DB_PATH: "/app/data/dashboard.db"
+
+      # --- Active backend (ADR-0001) ---
+      ACTIVE_MODEL: "voyage_nano_1024"
+      ACTIVE_BACKEND: "llama_q8"
+
+      # --- MCP disabled di dashboard service (MCP via stdio, terpisah) ---
+      MCP_ENABLED: "false"
+
+    # SATU-SATUNYA `ports:` di file ini. Easypanel reverse-proxy domain ke sini.
+    ports:
+      - "8081:8081"
+
+    volumes:
+      # Persist SQLite + project metadata across restarts.
+      - bit-rag-data:/app/data
+
+    networks:
+      - bit-rag-net
+
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      embedder:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  # Internal bridge: dashboard ↔ embedder ↔ qdrant.
+  # Tidak ada koneksi keluar Docker (kecuali via dashboard:8081 host port).
+  bit-rag-net:
+    driver: bridge
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
+volumes:
+  bit-rag-data:
+    driver: local
+  qdrant-storage:
+    driver: local
+  qdrant-snapshots:
+    driver: local

@@ -1,0 +1,27 @@
+[
+  {
+    "id": "q1",
+    "query": "how is the embedding model configured",
+    "relevant_files": ["pkg/config/config.go", "pkg/rag/llama.go"]
+  },
+  {
+    "id": "q2",
+    "query": "api key authentication middleware",
+    "relevant_files": ["pkg/auth/middleware.go", "docs/adr/0003-dashboard-auth-api-key.md"]
+  },
+  {
+    "id": "q3",
+    "query": "qdrant vector store client",
+    "relevant_files": ["pkg/rag/qdrant.go", "pkg/rag/provider.go"]
+  },
+  {
+    "id": "q4",
+    "query": "dashboard http server routes",
+    "relevant_files": ["pkg/dashboard/server.go", "cmd/dashboard/main.go"]
+  },
+  {
+    "id": "q5",
+    "query": "ast aware code chunking",
+    "relevant_files": ["pkg/chunker/chunker.go"]
+  }
+]
