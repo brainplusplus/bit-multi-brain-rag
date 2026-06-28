@@ -50,7 +50,7 @@ services:
       DASHBOARD_API_KEYS: "${DASHBOARD_API_KEYS}"
 
       # --- Embedding (internal: pakai service name "embedder") ---
-      EMBEDDING_ENDPOINT: "http://embedder:8080"
+      EMBEDDING_ENDPOINT: "http://bit-rag-embedder:8080"
       EMBEDDING_MODEL: "voyage-4-nano"
       EMBEDDING_DIM: "1024"
       EMBEDDING_POOLING: "mean"
