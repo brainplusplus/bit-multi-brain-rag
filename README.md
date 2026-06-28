@@ -1,5 +1,3 @@
-# bit-multi-brain-rag
-
 > Multi-project semantic code search via **self-hosted voyage-4-nano embeddings**
 > + Qdrant + a single Go binary. Exposes results to AI agents (Claude Desktop,
 > Factory, OpenCode, Codex, Cursor, Continue, Windsurf) via a local **MCP
@@ -13,83 +11,144 @@
 ## TL;DR
 
 ```
-AI Agent
+AI Agent (Claude / Factory / Cursor / etc.)
   │  MCP stdio (JSON-RPC 2.0)
   ▼
-bit-rag-mcp        ← LOCAL binary (this repo, ~12 MB)
-  │  HTTPS POST /api/v1/search
+bit-rag-mcp        ← LOCAL binary (scans files, chunks, uploads)
+  │  HTTPS POST /api/v1/*
   ▼
-bit-rag dashboard  ← REMOTE service (Easypanel / Docker), port 8081
-  │  internal Docker network
+bit-rag dashboard  ← REMOTE service (Docker / Easypanel), port 8081
+  │  embed (GPU) + store (Qdrant)
   ▼
 embedder (llama.cpp Q8) + Qdrant
 ```
 
-**Why this architecture:**
-- One public endpoint (the dashboard). Qdrant + embedder stay private.
+**Architecture (refactored):**
+- **MCP scans files locally** (tree-sitter AST chunking), sends pre-chunked
+  docs to dashboard for embedding + storage. **No mounting needed.**
+- Dashboard only does **embed (GPU) + store (Qdrant)**. Zero filesystem access.
 - Single API key (`DASHBOARD_API_KEYS`) for all clients.
-- **Source code never leaves your machine.** Only the query text + project
-  name travel over the wire.
 - Self-hosted embeddings (voyage-4-nano Q8 GGUF) — no per-call cost.
+- **Multi-machine ready** — per-machine ID + per-project mutex for concurrent agents.
 
 ---
 
 ## Quick start
 
-### Option A — Use the public deployment (consumer)
-
-If someone has already deployed the dashboard for you:
+### Option A — Deploy your own server + install client (self-hosted)
 
 ```bash
-# Clone for the installer scripts and skill files
 git clone https://github.com/brainplusplus/bit-multi-brain-rag.git
 cd bit-multi-brain-rag
 
-# Linux/macOS
-./scripts/install-mcp.sh
 # Windows (PowerShell)
-.\scripts\install-mcp.ps1
+.\scripts\setup.ps1
+
+# Linux / macOS
+./scripts/setup.sh
 ```
 
-Then add the MCP entry to your AI client config — see
-[**docs/INSTALL-MCP-LOCAL.md**](./docs/INSTALL-MCP-LOCAL.md) for full
-copy-paste recipes for 7 clients.
+The setup wizard will:
+1. Check prerequisites (Docker, Go)
+2. Generate `.env` with a random API key
+3. Deploy Qdrant + embedder + dashboard via Docker Compose
+4. Build the MCP binary locally
+5. Print ready-to-paste MCP config for your AI tool
 
-### Option B — Deploy your own dashboard (operator)
+### Option B — Use an existing dashboard (consumer)
+
+If someone already deployed the dashboard for you:
 
 ```bash
 git clone https://github.com/brainplusplus/bit-multi-brain-rag.git
 cd bit-multi-brain-rag
 
-# Deploy to Easypanel (recommended) or any Docker host
-# Full guide: docs/DEPLOY-EASYPANEL.md
-cd infra/easypanel
-cp .env.example .env
-# Edit .env: set DASHBOARD_API_KEYS, EMBEDDER_TOKEN, etc.
-docker compose -f compose.split.yaml up -d
+# Windows
+.\scripts\install-mcp.ps1
+# Linux / macOS
+./scripts/install-mcp.sh
 ```
 
-See [**docs/DEPLOY-EASYPANEL.md**](./docs/DEPLOY-EASYPANEL.md) for the full
-deployment recipe (3 compose variants, Cloudflare/Caddy/Traefik, healthchecks,
-volume strategy).
+Then add the MCP entry to your AI client config (see
+[docs/INSTALL-MCP-LOCAL.md](./docs/INSTALL-MCP-LOCAL.md) for copy-paste
+recipes for 7 clients).
+
+---
+
+## How it works
+
+### Indexing (MCP → Dashboard)
+
+```
+MCP (local)                           Dashboard (Docker / VPS)
+┌────────────────────────┐            ┌────────────────────┐
+│ Walk project folder    │            │                    │
+│ Read files locally     │            │                    │
+│ Chunk (tree-sitter AST)│            │                    │
+│ Compute SHA-256        │            │                    │
+│                        │──HTTPS────→│ POST /api/v1/index/│
+│ Send chunks in batches │  (JSON)    │      upload        │
+│                        │            │ Embed (GPU)        │
+│                        │←───────────│ Store (Qdrant)     │
+└────────────────────────┘            └────────────────────┘
+  scan + chunk LOCAL                    embed + store ONLY
+  NO filesystem access on server        NO mounting needed
+```
+
+The MCP client walks the project folder **locally**, chunks files with
+tree-sitter (25+ languages), and uploads pre-chunked documents to the
+dashboard. The dashboard only embeds + stores — it never touches the
+filesystem.
+
+### Search (MCP → Dashboard)
+
+```
+User: "where is JWT validation?"
+  │
+  MCP: POST /api/v1/search
+  │     {"project_id": 5, "query": "JWT validation", "limit": 5}
+  │
+  Dashboard: hybrid search (dense + sparse + RRF)
+  │     → Qdrant Query API
+  │
+  ← Results with file, symbol, lines, score
+```
+
+### Multi-machine + multi-agent
+
+- **Machine ID**: Each MCP client sends `X-Machine-ID` (platform-specific:
+  Windows registry MachineGuid, Linux `/etc/machine-id`, macOS IOPlatformUUID).
+  Same `root_path` on different machines = different projects.
+- **Concurrent safety**: Per-project mutex on the dashboard serializes
+  concurrent uploads (2 agents indexing the same project = no race condition).
+- **Search is always parallel-safe** (read-only).
 
 ---
 
 ## Features
 
-- **AST-aware chunking** via `smacker/go-tree-sitter` — preserves function /
-  class / method boundaries instead of dumb line-split.
-- **Self-hosted embeddings** — voyage-4-nano Q8 GGUF on llama.cpp HTTP server
-  with `--pooling mean`. ~50–200 ms/query. No vendor lock-in.
-- **Multi-project isolation** — each project gets its own Qdrant collection
-  keyed by `{project}_{domain}_{model}_{dim}_{backend}`.
-- **Dashboard UI** — HTMX + Echo, project CRUD, index trigger, search debug,
-  bench harness, API-key management.
-- **MCP server (stdio)** — JSON-RPC 2.0, registers `rag_search_code` tool.
-  Fail-fast healthz at boot.
-- **Auth** — bearer-token middleware, multiple keys via comma-separated
-  `DASHBOARD_API_KEYS`.
-- **Bench harness** — `cmd/bench` runs recall@k + latency on a labeled set.
+- **AST-aware chunking** via tree-sitter — 25+ languages, preserves function /
+  class / method boundaries.
+- **Self-hosted embeddings** — voyage-4-nano Q8 GGUF on llama.cpp, GPU-accelerated
+  (RTX 3090: 52-236x faster than CPU).
+- **Hybrid search** — dense embeddings (semantic) + BM25 sparse (keyword) +
+  Reciprocal Rank Fusion.
+- **Incremental indexing** — SHA-256 fingerprint per file, skip unchanged,
+  delete stale points.
+- **.gitignore respect** — nested .gitignore matcher with glob/directory/negation.
+- **File watcher** — fsnotify-based, 5s debounce, auto re-index on change.
+- **Multi-project isolation** — each project gets its own Qdrant collection.
+- **Multi-machine** — machine ID + hostname per project, no cross-machine collision.
+- **Dashboard UI** — HTMX + Echo, project CRUD, search debug, GPU management,
+  model hot-swap, hybrid toggle, settings.
+- **MCP server (stdio)** — 6 tools, JSON-RPC 2.0, project_id-based identity.
+- **6 MCP tools**:
+  - `rag_create_project` — register + index (idempotent by root_path + machine)
+  - `rag_search_code` — semantic search, ranked results
+  - `rag_retrieve_context` — search formatted as paste-ready context
+  - `rag_index_project` — re-index after code changes
+  - `rag_list_projects` — list all projects
+  - `rag_project_status` — check registration + index status
 
 ---
 
@@ -99,49 +158,64 @@ See `docs/adr/` for full decision records:
 
 | ADR | Topic |
 |---|---|
-| **0001** | Embedding model: voyage-4-nano 1024-dim (Q8 llama.cpp server) |
-| **0002** | Dashboard scope + multi-project index isolation |
-| **0003** | API-key authentication (global key, per-project scope is TODO) |
-| **0004** | Hybrid architecture (Go + tree-sitter + Qdrant + MCP/dashboard) |
+| 0001 | Embedding model: voyage-4-nano 1024-dim (Q8 llama.cpp) |
+| 0002 | Dashboard scope + multi-project index isolation |
+| 0003 | API-key authentication |
+| 0004 | Hybrid architecture (Go + tree-sitter + Qdrant + MCP) |
+| 0005 | Background job manager for indexing |
+| 0006 | GPU embedding acceleration (CDI, RTX 3090 benchmark) |
+| 0007 | Gap analysis + improvement roadmap |
+| 0008 | Hybrid search (dense + sparse + RRF) |
 
 ### Repo layout
 
 ```
 bit-multi-brain-rag/
 ├── cmd/
-│   ├── dashboard/         HTTP dashboard server (Echo, HTMX UI, REST /api/v1/*)
-│   ├── mcp/               MCP stdio server — proxies to dashboard
-│   └── bench/             Recall + latency benchmark runner
+│   ├── dashboard/        HTTP dashboard server
+│   ├── mcp/              MCP stdio server (scans + chunks locally)
+│   ├── embed-bench/      GPU vs CPU embedding benchmark
+│   └── bench/            Recall + latency benchmark
 ├── pkg/
-│   ├── config/            .env loader (dashboard config)
-│   ├── auth/              API-key middleware
-│   ├── rag/               Vector store + embedding provider interfaces
-│   │   ├── provider.go      Provider + EmbeddingClient interfaces
-│   │   ├── llama.go         llama.cpp Q8 HTTP embedder (OpenAI-compatible)
-│   │   └── qdrant.go        Qdrant vector store impl
-│   ├── ragclient/         HTTP client to /api/v1/search (used by MCP)
-│   ├── indexer/           Scan + chunk + embed + store pipeline
-│   ├── chunker/           AST-aware chunker (smacker/go-tree-sitter)
-│   ├── mcp/               MCP tool registry + stdio JSON-RPC loop
-│   ├── dashboard/         Echo handlers (projects, search, bench, UI)
-│   ├── store/             SQLite metadata (projects, jobs, api keys)
-│   └── bench/             Benchmark runner
-├── web/
-│   ├── templates/         HTMX templates
-│   └── static/            CSS/JS
-├── infra/
-│   └── easypanel/         Dockerfiles + 3 compose variants + .env.example
-├── scripts/
-│   ├── install-mcp.ps1    Windows installer (build + install + test)
-│   └── install-mcp.sh     Linux/macOS installer
-├── skills/
-│   ├── factory/bit-rag.md OpenCode/Factory skill file (auto-injectable)
-│   └── opencode/bit-rag.md
+│   ├── chunker/          AST chunker (25+ languages, tree-sitter)
+│   ├── indexer/          Chunk + embed + store pipeline
+│   ├── rag/              Qdrant + embedder + BM25 hybrid search
+│   ├── ragclient/        HTTP client to dashboard (used by MCP)
+│   ├── mcp/              6 MCP tools (JSON-RPC over stdio)
+│   ├── dashboard/        Echo HTTP handlers + UI
+│   ├── store/            SQLite (projects, jobs, models, fingerprints)
+│   ├── machineid/        Cross-platform machine ID (Win/Linux/Mac)
+│   ├── watcher/          fsnotify file watcher
+│   └── config/           .env loader
+├── skills/               Skill files for AI agents
+│   ├── factory/          Factory Droid skill + templates
+│   └── opencode/         OpenCode skill
+├── scripts/              Setup + install scripts
+│   ├── setup.ps1         Windows full setup wizard
+│   ├── setup.sh          Linux/macOS full setup wizard
+│   ├── install-mcp.ps1   Windows MCP-only installer
+│   └── install-mcp.sh    Linux/macOS MCP-only installer
+├── docker-compose.yml    Dashboard + embedder
+├── docker-compose.qdrant.yml  Qdrant (separate for independent lifecycle)
+├── Dockerfile            Multi-stage Alpine build
 └── docs/
-    ├── adr/               Architecture Decision Records
+    ├── adr/              Architecture Decision Records
     ├── DEPLOY-EASYPANEL.md
     └── INSTALL-MCP-LOCAL.md
 ```
+
+---
+
+## Privacy
+
+- **During search**: Only `{project_id, query, limit}` leaves your machine.
+- **During indexing**: Source code chunks are sent to the dashboard for
+  embedding + storage. If the dashboard is remote (VPS/Easypanel), chunks
+  traverse the network. The index lives server-side in Qdrant.
+- **Machine ID**: Sent as HMAC-SHA256 hash (not reversible, deterministic
+  per machine).
+- Treat queries and indexed content as sensitive when working on
+  confidential codebases.
 
 ---
 
@@ -150,95 +224,10 @@ bit-multi-brain-rag/
 Requires Go 1.24+ and a C toolchain (tree-sitter uses CGO).
 
 ```bash
-git clone https://github.com/brainplusplus/bit-multi-brain-rag.git
-cd bit-multi-brain-rag
-
-# Build all 3 binaries
 go build -o bin/bit-rag-dashboard ./cmd/dashboard
 go build -o bin/bit-rag-mcp       ./cmd/mcp
 go build -o bin/bit-rag-bench     ./cmd/bench
 ```
-
-Module path: `github.com/brainplusplus/bit-multi-brain-rag`.
-
----
-
-## Run locally (dev)
-
-```bash
-cp .env.example .env
-# Edit: DASHBOARD_API_KEYS, EMBEDDING_ENDPOINT, QDRANT_URL, etc.
-
-# Start Qdrant + embedder via Docker (or use existing ones)
-docker run -p 6333:6333 qdrant/qdrant
-# (set up llama.cpp embedder per docs/adr/0001)
-
-# Run dashboard
-./bin/bit-rag-dashboard
-
-# Open http://localhost:8081
-```
-
-### Smoke test the API
-
-```bash
-# Health (public)
-curl http://localhost:8081/healthz
-
-# Search (auth required)
-curl -X POST http://localhost:8081/api/v1/search \
-  -H "Authorization: Bearer your-key" \
-  -H "Content-Type: application/json" \
-  -d '{"project":"demo","query":"JWT validation","limit":5}'
-```
-
----
-
-## Index isolation key
-
-Each Qdrant collection is keyed by:
-
-```
-{project_id}_{domain}_{model}_{dim}_{backend}
-```
-
-- `domain`: `code` | `doc` | `task` (phase 1: `code` only)
-- `model`: `voyage_nano_1024`
-- `dim`: `1024`
-- `backend`: `llama_q8` | `st_fp16` (phase 1: `llama_q8`)
-
-This allows side-by-side comparison of different embedding models on the same
-data without index collision.
-
----
-
-## Status
-
-| Component | Status |
-|---|---|
-| Dashboard HTTP API + UI | ✅ Implemented |
-| MCP server (stdio) | ✅ Implemented + refactored to HTTP-proxy mode |
-| Indexer pipeline (scan→chunk→embed→Qdrant) | ✅ Implemented |
-| Bench harness | ✅ Implemented |
-| Docker / Easypanel compose | ✅ 3 variants (split, all-in-one, behind-proxy) |
-| Installer scripts (Windows + Linux/macOS) | ✅ Implemented |
-| Skill files (Factory + OpenCode) | ✅ Implemented |
-| Q8 recall verification | ⏳ Blocked on Easypanel deploy |
-| Per-project API-key scope | 📋 TODO (ADR-0003 revision) |
-
----
-
-## Privacy & security
-
-1. **Code stays local.** The indexer reads code from the dashboard host; the
-   MCP only sends queries.
-2. **HTTPS only** — terminate TLS at Caddy/Traefik in front of the dashboard.
-3. **Bearer auth** — `DASHBOARD_API_KEYS` is comma-separated for per-developer
-   rotation.
-4. **Don't paste secrets into queries** — query text is logged server-side
-   for debugging.
-
-See `docs/INSTALL-MCP-LOCAL.md` § Security for the full checklist.
 
 ---
 
@@ -254,5 +243,4 @@ MIT — see `LICENSE`.
 - [labstack/echo](https://github.com/labstack/echo) — HTTP router
 - [qdrant/qdrant](https://github.com/qdrant/qdrant) — vector DB
 - [ggerganov/llama.cpp](https://github.com/ggerganov/llama.cpp) — embedder runtime
-- [voyage-code-3](https://blog.voyageai.com/2024/05/30/voyage-code-3/) — embedding model
-- Reference projects: `cocoindex-code` (chunker design), `enowx-rag` (MCP+dashboard design)
+- Reference: [enowx-rag](https://github.com/enowx/enowx-rag) (MCP local-scan architecture)
