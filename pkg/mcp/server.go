@@ -514,6 +514,16 @@ func (t *IndexProjectTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "Local filesystem path to the project root (if different from registered path).",
 			},
+			"include_patterns": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Glob patterns for files to include (e.g. [\"**/*.ts\", \"**/*.go\"]). Empty = all source files.",
+			},
+			"exclude_patterns": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Glob patterns to exclude (e.g. [\"**/test/**\", \"**/*.generated.ts\"]). Applied after includes.",
+			},
 		},
 	}
 }
@@ -542,8 +552,11 @@ func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (Too
 		return ToolResult{}, fmt.Errorf("no root_path: project has no registered root_path and none provided")
 	}
 
+	// Build pattern filter from optional include/exclude args.
+	pf := buildPatternFilter(args)
+
 	// Walk local folder + chunk + upload.
-	stats, err := localIndex(ctx, t.client, name, rootPath)
+	stats, err := localIndexWithPatterns(ctx, t.client, name, rootPath, pf)
 	if err != nil {
 		return ToolResult{}, err
 	}
@@ -570,6 +583,11 @@ func LocalIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 	return localIndex(ctx, client, project, rootPath)
 }
 
+// LocalIndexWithPatterns is like LocalIndex but with include/exclude pattern filter.
+func LocalIndexWithPatterns(ctx context.Context, client *ragclient.Client, project, rootPath string, pf *indexer.PatternFilter) (*LocalIndexStats, error) {
+	return localIndexWithPatterns(ctx, client, project, rootPath, pf)
+}
+
 // DeltaIndex chunks and uploads ONLY changed files.
 // Exported for CLI watcher use.
 func DeltaIndex(ctx context.Context, client *ragclient.Client, project, rootPath string, changedFiles []string) (*LocalIndexStats, error) {
@@ -584,8 +602,12 @@ type localIndexStats struct {
 }
 
 // localIndex walks the local folder, chunks files, and uploads to dashboard.
-// This replaces the old "dashboard walks the filesystem" approach — no mounting.
 func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath string) (*localIndexStats, error) {
+	return localIndexWithPatterns(ctx, client, project, rootPath, nil)
+}
+
+// localIndexWithPatterns is the core walk+chunk+upload with optional pattern filter.
+func localIndexWithPatterns(ctx context.Context, client *ragclient.Client, project, rootPath string, pf *indexer.PatternFilter) (*localIndexStats, error) {
 	start := time.Now()
 	ch := chunker.New()
 	stats := &localIndexStats{}
@@ -614,6 +636,12 @@ func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 		if gi != nil {
 			rel, _ := filepath.Rel(rootPath, path)
 			if gi.Match(rel) {
+				return nil
+			}
+		}
+		if pf != nil {
+			rel, _ := filepath.Rel(rootPath, path)
+			if !pf.Match(rel) {
 				return nil
 			}
 		}
@@ -866,6 +894,16 @@ func (t *CreateProjectTool) InputSchema() map[string]any {
 				"description": "If true (default), scan files locally + upload to dashboard for embedding immediately.",
 				"default":     true,
 			},
+			"include_patterns": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Glob patterns for files to include (e.g. [\"**/*.ts\"]). Empty = all source files.",
+			},
+			"exclude_patterns": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Glob patterns to exclude (e.g. [\"**/test/**\"]).",
+			},
 		},
 		"required": []string{"root_path"},
 	}
@@ -937,7 +975,8 @@ func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (To
 	sb.WriteString(fmt.Sprintf("IMPORTANT: Use project_id=%d in all subsequent tool calls (rag_search_code, rag_index_project, etc).\n", p.ID))
 
 	if doIndex {
-		stats, err := localIndex(ctx, t.client, name, rootPath)
+		pf := buildPatternFilter(args)
+		stats, err := localIndexWithPatterns(ctx, t.client, name, rootPath, pf)
 		if err != nil {
 			sb.WriteString(fmt.Sprintf("WARNING: indexing failed: %v\n", err))
 			sb.WriteString("Call rag_index_project manually to retry.\n")
@@ -1258,4 +1297,27 @@ func (t *SearchAcrossTool) Handle(ctx context.Context, args map[string]any) (Too
 		sb.WriteString(fmt.Sprintf("Total: %d results across %d projects.\n", totalResults, len(projects)))
 	}
 	return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
+}
+
+// buildPatternFilter extracts include/exclude pattern arrays from tool args.
+func buildPatternFilter(args map[string]any) *indexer.PatternFilter {
+	var includes, excludes []string
+	if v, ok := args["include_patterns"].([]any); ok {
+		for _, p := range v {
+			if s, ok := p.(string); ok {
+				includes = append(includes, s)
+			}
+		}
+	}
+	if v, ok := args["exclude_patterns"].([]any); ok {
+		for _, p := range v {
+			if s, ok := p.(string); ok {
+				excludes = append(excludes, s)
+			}
+		}
+	}
+	if len(includes) == 0 && len(excludes) == 0 {
+		return nil
+	}
+	return indexer.NewPatternFilter(includes, excludes)
 }

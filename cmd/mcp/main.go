@@ -312,7 +312,18 @@ func cliIndex(ctx context.Context, client *ragclient.Client, logger *slog.Logger
 	fmt.Fprintf(os.Stderr, "Indexing project %q (ID: %d, root: %s)\n", p.Name, p.ID, p.RootPath)
 
 	// Index (no timeout — CLI mode)
-	stats, err := mcp.LocalIndex(ctx, client, name, rootPath)
+	// Build pattern filter from --include/--exclude flags (comma-separated).
+	var pf *indexer.PatternFilter
+	if inc, ok := flags["include"]; ok && inc != "" {
+		includes := strings.Split(inc, ",")
+		var excludes []string
+		if exc, ok := flags["exclude"]; ok && exc != "" {
+			excludes = strings.Split(exc, ",")
+		}
+		pf = indexer.NewPatternFilter(includes, excludes)
+	}
+
+	stats, err := mcp.LocalIndexWithPatterns(ctx, client, name, rootPath, pf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Index failed: %v\n", err)
 		os.Exit(1)
