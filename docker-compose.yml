@@ -99,6 +99,9 @@ services:
   # ---------------------------------------------------------------------------
   # Embedder: llama.cpp Q8 voyage-4-nano. INTERNAL ONLY (no published ports).
   # Tidak ada `ports:` block → tidak bisa diakses dari luar Docker.
+  #
+  # GPU: Aktif via CDI (nvidia.com/gpu=all). Bila host tidak punya GPU,
+  # comment out `runtime` + `deploy.resources` block → embedder jalan CPU.
   # ---------------------------------------------------------------------------
   embedder:
     build:
@@ -108,9 +111,21 @@ services:
     container_name: bit-rag-embedder
     restart: unless-stopped
 
+    # GPU support via NVIDIA Container Toolkit (ADR-0006).
+    # CDI mode = portable across Rancher Desktop / Docker Desktop / Linux.
+    runtime: nvidia
     environment:
-      # llama-server auto-detect env LLAMA_API_KEY (built-in di base image).
+      # llama-server auto-detect env LLAMA_API_KEY ********* di base image).
       LLAMA_API_KEY: "${LLAMA_API_KEY}"
+      NVIDIA_VISIBLE_DEVICES: "all"
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
     # NO `ports:` here. Embedder hanya akses-able via service name "embedder"
     # dari container lain di network bit-rag-net.

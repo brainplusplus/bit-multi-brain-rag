@@ -60,8 +60,9 @@ services:
       - bit-rag-external
 
     healthcheck:
-      # Qdrant 1.15+ punya /healthz. Untuk versi lama pakai / (returns 200).
-      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || wget -qO- http://localhost:6333/ || exit 1"]
+      # Qdrant image (Debian-based) tidak include wget/curl. Test TCP
+      # listen via /proc/net/tcp: port 6333 = 0x18BD. State 0A = LISTEN.
+      test: ["CMD-SHELL", "grep -q '18BD' /proc/net/tcp"]
       interval: 30s
       timeout: 5s
       retries: 3
