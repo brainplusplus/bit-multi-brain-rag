@@ -164,16 +164,14 @@ func (s *Server) uiIndexProgress(c echo.Context) error {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<div class='index-progress' hx-get='/ui/index/progress?project=")
-	sb.WriteString(template.HTMLEscapeString(project))
-	sb.WriteString("' hx-trigger='every 2s' hx-target='this' hx-swap='outerHTML' hx-target='#index-progress'>")
-	sb.WriteString(fmt.Sprintf("<div class='progress-bar-wrap'><div class='progress-bar-fill' style='width:%d%%'></div></div>", pct))
+	sb.WriteString("<div class='progress-bar-wrap'><div class='progress-bar-fill' style='width:")
+	sb.WriteString(fmt.Sprint(pct))
+	sb.WriteString("%'></div></div>")
 	sb.WriteString(fmt.Sprintf("<div class='progress-label'>%s: %d/%d files (%d%%)</div>",
 		template.HTMLEscapeString(p.Phase), p.Scanned, p.Total, pct))
 	if p.Message != "" {
 		sb.WriteString(fmt.Sprintf("<div class='progress-file muted small'>%s</div>", template.HTMLEscapeString(p.Message)))
 	}
-	sb.WriteString("</div>")
 	return c.HTML(200, sb.String())
 }
 
