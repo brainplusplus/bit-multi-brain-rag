@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,13 +35,86 @@ import (
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/indexer"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/ragclient"
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/watcher"
 )
 
 // Server is the MCP stdio server.
 type Server struct {
-	rag    *ragclient.Client
-	tools  map[string]Tool
-	logger *slog.Logger
+	rag     *ragclient.Client
+	tools   map[string]Tool
+	logger  *slog.Logger
+	wm      *WatcherManager
+}
+
+// WatcherManager tracks active file watchers per project. When a project
+// is created or indexed, a watcher starts for its root_path. On file change,
+// it triggers a debounced re-index via localIndex (walk + chunk + upload).
+type WatcherManager struct {
+	mu       sync.Mutex
+ watchers map[string]*watcher.Watcher // key = project name
+	client   *ragclient.Client
+ logger   *slog.Logger
+ ctx      context.Context
+}
+
+// NewWatcherManager creates a WatcherManager tied to the MCP server's context.
+func NewWatcherManager(client *ragclient.Client, logger *slog.Logger, ctx context.Context) *WatcherManager {
+	return &WatcherManager{
+		watchers: make(map[string]*watcher.Watcher),
+		client:   client,
+		logger:   logger,
+		ctx:      ctx,
+	}
+}
+
+// StartWatching begins watching rootPath for project. If a watcher already
+// exists for this project, it is replaced.
+func (wm *WatcherManager) StartWatching(project, rootPath string) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	// Stop existing watcher for this project.
+	if old, ok := wm.watchers[project]; ok {
+		old.Stop()
+		delete(wm.watchers, project)
+	}
+
+	onChange := func() {
+		wm.logger.Info("auto re-index triggered by file watcher", "project", project, "root", rootPath)
+		// Run in background — don't block the watcher goroutine.
+		go func() {
+			stats, err := localIndex(wm.ctx, wm.client, project, rootPath)
+			if err != nil {
+				wm.logger.Error("auto re-index failed", "project", project, "error", err)
+				return
+			}
+			wm.logger.Info("auto re-index complete",
+				"project", project,
+				"files", stats.FilesScanned,
+				"chunks", stats.Chunks,
+				"embedded", stats.Embedded,
+				"duration", stats.Duration)
+		}()
+	}
+
+	w, err := watcher.New(rootPath, onChange, wm.logger)
+	if err != nil {
+		wm.logger.Error("watcher create failed", "project", project, "root", rootPath, "error", err)
+		return
+	}
+	wm.watchers[project] = w
+	go w.Start(wm.ctx)
+	wm.logger.Info("watcher started", "project", project, "root", rootPath)
+}
+
+// StopAll stops all active watchers (called on MCP shutdown).
+func (wm *WatcherManager) StopAll() {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	for project, w := range wm.watchers {
+		w.Stop()
+		delete(wm.watchers, project)
+	}
 }
 
 // Tool is the registry contract for an MCP tool.
@@ -66,17 +140,20 @@ type ContentBlock struct {
 
 // New constructs an MCP server backed by a dashboard HTTP client.
 func New(client *ragclient.Client, logger *slog.Logger) *Server {
+	ctx := context.Background()
+	wm := NewWatcherManager(client, logger, ctx)
 	s := &Server{
 		rag:    client,
 		tools:  make(map[string]Tool),
 		logger: logger,
+		wm:     wm,
 	}
 	// Register tools (ADR-0007 Phase 9 expansion).
 	s.Register(&CodeRAGTool{client: client})
 	s.Register(&RetrieveContextTool{client: client})
-	s.Register(&IndexProjectTool{client: client})
+	s.Register(&IndexProjectTool{client: client, wm: wm})
 	s.Register(&ListProjectsTool{client: client})
-	s.Register(&CreateProjectTool{client: client})
+	s.Register(&CreateProjectTool{client: client, wm: wm})
 	s.Register(&ProjectStatusTool{client: client})
 	return s
 }
@@ -89,6 +166,12 @@ func (s *Server) Register(t Tool) {
 // Serve runs the MCP JSON-RPC loop on stdio until ctx is cancelled or stdin EOF.
 func (s *Server) Serve(ctx context.Context) error {
 	s.logger.Info("mcp serving on stdio", "tools", len(s.tools))
+	// Stop all file watchers on shutdown.
+	defer func() {
+		if s.wm != nil {
+			s.wm.StopAll()
+		}
+	}()
 	decoder := json.NewDecoder(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
 	for {
@@ -402,6 +485,7 @@ func formatContext(query, project string, results []rag.Result) string {
 // dashboard only embeds + stores.
 type IndexProjectTool struct {
 	client *ragclient.Client
+	wm     *WatcherManager
 }
 
 func (t *IndexProjectTool) Name() string { return "rag_index_project" }
@@ -461,9 +545,15 @@ func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (Too
 		return ToolResult{}, err
 	}
 
+	// Start/refresh file watcher for auto re-index on changes.
+	if t.wm != nil {
+		t.wm.StartWatching(name, rootPath)
+	}
+
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
-			"Indexed project %q (ID: %d).\nFiles scanned: %d\nChunks: %d\nEmbedded: %d\nStored: %d\nDuration: %s\n",
+			"Indexed project %q (ID: %d).\nFiles scanned: %d\nChunks: %d\nEmbedded: %d\nStored: %d\nDuration: %s\n"+
+				"File watcher active — changes will auto-reindex.\n",
 			name, projectID, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration)}},
 	}, nil
 }
@@ -635,6 +725,7 @@ func (t *ListProjectsTool) Handle(ctx context.Context, args map[string]any) (Too
 // call on already-registered projects.
 type CreateProjectTool struct {
 	client *ragclient.Client
+	wm     *WatcherManager
 }
 
 func (t *CreateProjectTool) Name() string { return "rag_create_project" }
@@ -746,6 +837,11 @@ func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (To
 		} else {
 			sb.WriteString(fmt.Sprintf("Indexing complete: %d files, %d chunks, %d embedded, %d stored (%s).\n",
 				stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration))
+			// Start file watcher for auto re-index.
+			if t.wm != nil {
+				t.wm.StartWatching(name, rootPath)
+				sb.WriteString("File watcher active — changes will auto-reindex.\n")
+			}
 		}
 	}
 	sb.WriteString("\nNext steps:\n")
