@@ -41,10 +41,11 @@ import (
 
 // Server is the MCP stdio server.
 type Server struct {
-	rag     *ragclient.Client
-	tools   map[string]Tool
-	logger  *slog.Logger
-	wm      *WatcherManager
+	rag       *ragclient.Client
+	tools     map[string]Tool
+	logger    *slog.Logger
+	wm        *WatcherManager
+	indexingMu sync.Map // key=projectID → bool (true if indexing in progress)
 }
 
 // WatcherManager tracks active file watchers per project. When a project
@@ -164,7 +165,7 @@ func New(client *ragclient.Client, logger *slog.Logger) *Server {
 	// Register tools (ADR-0007 Phase 9 expansion).
 	s.Register(&CodeRAGTool{client: client})
 	s.Register(&RetrieveContextTool{client: client})
-	s.Register(&IndexProjectTool{client: client, wm: wm})
+	s.Register(&IndexProjectTool{client: client, wm: wm, srv: s})
 	s.Register(&ListProjectsTool{client: client})
 	s.Register(&CreateProjectTool{client: client, wm: wm})
 	s.Register(&ProjectStatusTool{client: client})
@@ -592,6 +593,7 @@ func formatContext(query, project string, results []rag.Result) string {
 type IndexProjectTool struct {
 	client *ragclient.Client
 	wm     *WatcherManager
+	srv    *Server // for indexing guard
 }
 
 func (t *IndexProjectTool) Name() string { return "rag_index_project" }
@@ -635,6 +637,16 @@ func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (Too
 	projectID, projectName := extractProjectArgs(args)
 	if projectID == 0 && projectName == "" {
 		return ToolResult{}, fmt.Errorf("project_id or project is required")
+	}
+
+	// Guard: reject if already indexing this project.
+	if t.srv != nil {
+		if _, ok := t.srv.indexingMu.Load(fmt.Sprintf("%d", projectID)); ok {
+			return ToolResult{Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+				"Project %d is already being indexed in the background.\n"+
+					"Poll rag_project_status to check progress. Do not call rag_index_project again.",
+				projectID)}}}, nil
+		}
 	}
 
 	// Resolve project info from dashboard.
@@ -698,7 +710,16 @@ func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (Too
 		}
 
 		// Many changes → async (return immediately, index in background).
+		pidKey := fmt.Sprintf("%d", proj.ID)
+		if t.srv != nil {
+			t.srv.indexingMu.Store(pidKey, true)
+		}
 		go func() {
+			defer func() {
+				if t.srv != nil {
+					t.srv.indexingMu.Delete(pidKey)
+				}
+			}()
 			bgCtx := context.Background()
 			stats, wasDelta, err := IndexWithManifest(bgCtx, t.client, *proj, rootPath, pf)
 			if err != nil {
@@ -720,10 +741,12 @@ func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (Too
 		return ToolResult{
 			Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
 				"Indexing started in background for %q (%d files changed).\n"+
-					"This is a large reindex — it will take a few minutes.\n"+
-					"Progress visible at http://localhost:8081/projects/%d\n"+
-					"You can search immediately with existing index. Fresh results will appear after indexing completes.",
-				name, changedCount, proj.ID)}}}, nil
+					"This will take a few minutes. You can:\n"+
+					"1. Search immediately with the existing index (rag_search_code)\n"+
+					"2. Poll progress: call rag_project_status with project_id=%d every 30s\n"+
+					"3. Watch live progress: http://localhost:8081/projects/%d\n"+
+					"Do NOT call rag_index_project again — it will detect in-progress indexing and skip.",
+				name, changedCount, proj.ID, proj.ID)}}}, nil
 	}
 
 	// No manifest → first index. For large projects, run async.
