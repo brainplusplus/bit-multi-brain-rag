@@ -27,12 +27,14 @@ func (s *Server) collectionKeyFor(project string) rag.CollectionKey {
 }
 
 // doSearch embeds the query and searches the project's code collection.
-// It constructs the CollectionKey from the active model/backend config (ADR-0001).
+// When hybrid search is enabled and the collection supports sparse vectors,
+// it uses Qdrant's Query API with RRF fusion (ADR-0008). Otherwise falls
+// back to dense-only SemanticSearch.
 func (s *Server) doSearch(ctx context.Context, project, query string, limit int) ([]rag.Result, error) {
 	if s.rag == nil || s.embed == nil {
 		return nil, errBackendUnavailable
 	}
-	// Embed the query text.
+	// Embed the query text (dense vector).
 	vec, err := s.embedOne(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
@@ -42,6 +44,17 @@ func (s *Server) doSearch(ctx context.Context, project, query string, limit int)
 	if err := s.rag.CreateCollection(ctx, key); err != nil {
 		return nil, fmt.Errorf("ensure collection %s: %w", key, err)
 	}
+
+	// Try hybrid search if enabled and collection supports sparse vectors.
+	if s.hybridEnabled() {
+		if qc, ok := s.rag.(*rag.QdrantClient); ok && qc.CollectionHasSparse(ctx, key) {
+			sparseVec := s.bm25.BuildSearchSparse(query)
+			if sparseVec != nil {
+				return qc.HybridSearch(ctx, key, vec, sparseVec, limit)
+			}
+		}
+	}
+	// Fallback: dense-only search.
 	return s.rag.SemanticSearch(ctx, key, vec, limit)
 }
 

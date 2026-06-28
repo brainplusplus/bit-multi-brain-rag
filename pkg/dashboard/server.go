@@ -39,6 +39,19 @@ type Server struct {
 	chunker *chunker.Chunker
 	indexer *indexer.Indexer
 	jobs    *jobs.Manager // background index job orchestrator (ADR-0005)
+	bm25    *rag.BM25Vectorizer // BM25 sparse vectorizer for hybrid search (ADR-0008)
+}
+
+// hybridEnabled returns true if hybrid search (dense + sparse + RRF) should
+// be attempted. Checks: (1) bm25 vectorizer is fitted, (2) Settings toggle
+// is on (default: on). Returns false in dev mode without Qdrant.
+func (s *Server) hybridEnabled() bool {
+	if s.bm25 == nil {
+		return false
+	}
+	// Check settings table for hybrid_search toggle (default: enabled).
+	val := s.store.GetSetting(context.Background(), "hybrid_search")
+	return val != "off" // default on if setting doesn't exist or is empty
 }
 
 // New constructs a dashboard server with the given config.
@@ -93,6 +106,10 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// SQLite-persisted final state, startup recovery for orphan jobs.
 	jobMgr := jobs.NewManager(st, idx, logger)
 
+	// Initialize BM25 vectorizer for hybrid search (ADR-0008).
+	// Will be fitted on first indexing batch.
+	idx.HybridEnabled = true // enable hybrid by default
+
 	s := &Server{
 		cfg:     cfg,
 		logger:  logger,
@@ -102,6 +119,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		chunker: chk,
 		indexer: idx,
 		jobs:    jobMgr,
+		bm25:    rag.NewBM25Vectorizer(), // unfitted; fitted on first index batch
 	}
 
 	e := echo.New()
@@ -153,6 +171,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	e.POST("/ui/compare", s.uiCompare)                         // HTMX partial: comparison results
 	e.GET("/ui/settings", s.uiSettingsPanel)                   // HTMX partial: settings page (GPU, runtimes)
 	e.POST("/ui/settings/gpu/switch", s.uiGPUSwitch)           // HTMX partial: trigger GPU/CPU switch
+	e.POST("/ui/settings/hybrid/toggle", s.uiHybridToggle)    // HTMX partial: toggle hybrid search
 	e.GET("/ui/projects", s.uiProjectList)                     // HTMX partial: sidebar list
 	e.GET("/ui/projects/:id", s.uiProjectDetail)               // HTMX partial: project detail
 	e.GET("/ui/projects/:id/chunks", s.uiChunksPanel)          // HTMX partial: chunks browser panel

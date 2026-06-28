@@ -387,3 +387,156 @@ func (q *QdrantClient) Ping(ctx context.Context) error {
 	_, _, err := q.do(ctx, "GET", "/healthz", nil)
 	return err
 }
+
+// --- Hybrid search support (ADR-0008) ---
+
+// CreateCollectionWithSparse creates a collection with both dense (named "dense")
+// and sparse (named "text") vector configs for hybrid search.
+// Idempotent: returns nil if collection already exists.
+func (q *QdrantClient) CreateCollectionWithSparse(ctx context.Context, key CollectionKey) error {
+	collection := key.String()
+	if exists, err := q.collectionExists(ctx, collection); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
+	body := map[string]any{
+		"vectors": map[string]any{
+			"dense": map[string]any{
+				"size":     key.Dim,
+				"distance": "Cosine",
+			},
+		},
+		"sparse_vectors": map[string]any{
+			"text": map[string]any{},
+		},
+		"optimizers_config": map[string]any{
+			"default_partition_number": 8,
+		},
+	}
+	_, _, err := q.do(ctx, "PUT", "/collections/"+collection, body)
+	return err
+}
+
+// IndexWithSparse upserts points with both dense (named "dense") and sparse
+// (named "text") vectors. Used for hybrid search collections.
+func (q *QdrantClient) IndexWithSparse(ctx context.Context, key CollectionKey, docs []Document, denseVecs [][]float32, sparseVecs []*SparseVector) error {
+	if len(docs) != len(denseVecs) || len(docs) != len(sparseVecs) {
+		return fmt.Errorf("IndexWithSparse: length mismatch docs=%d dense=%d sparse=%d", len(docs), len(denseVecs), len(sparseVecs))
+	}
+	if len(docs) == 0 {
+		return nil
+	}
+	points := make([]map[string]any, 0, len(docs))
+	for i, doc := range docs {
+		payload := make(map[string]any, len(doc.Meta)+1)
+		for k, v := range doc.Meta {
+			payload[k] = v
+		}
+		payload["content"] = doc.Content
+
+		vector := map[string]any{
+			"dense": denseVecs[i],
+		}
+		if sparseVecs[i] != nil {
+			vector["text"] = sparseVecs[i]
+		}
+		points = append(points, map[string]any{
+			"id":      doc.ID,
+			"vector":  vector,
+			"payload": payload,
+		})
+	}
+	body := map[string]any{"points": points}
+	_, _, err := q.do(ctx, "PUT", "/collections/"+key.String()+"/points?wait=true", body)
+	return err
+}
+
+// HybridSearch performs dense + sparse retrieval with RRF fusion via
+// Qdrant's Query API (available since v1.10).
+// Falls back to dense-only SemanticSearch if sparseVec is nil.
+func (q *QdrantClient) HybridSearch(ctx context.Context, key CollectionKey, denseVec []float32, sparseVec *SparseVector, limit int) ([]Result, error) {
+	if sparseVec == nil {
+		return q.SemanticSearch(ctx, key, denseVec, limit)
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	prefetchLimit := limit * 3
+	if prefetchLimit < 20 {
+		prefetchLimit = 20
+	}
+	body := map[string]any{
+		"prefetch": []map[string]any{
+			{
+				"query": denseVec,
+				"using": "dense",
+				"limit": prefetchLimit,
+			},
+			{
+				"query": map[string]any{
+					"indices": sparseVec.Indices,
+					"values":  sparseVec.Values,
+				},
+				"using": "text",
+				"limit": prefetchLimit,
+			},
+		},
+		"query":        map[string]any{"rrf": map[string]any{}},
+		"limit":        limit,
+		"with_payload": true,
+	}
+	data, _, err := q.do(ctx, "POST", "/collections/"+key.String()+"/points/query", body)
+	if err != nil {
+		// Fallback to dense-only if Query API not supported (old Qdrant).
+		return q.SemanticSearch(ctx, key, denseVec, limit)
+	}
+	// Query API response shape: {"result": {"points": [...]}}
+	var qr struct {
+		Result struct {
+			Points []struct {
+				ID      any            `json:"id"`
+				Score   float64        `json:"score"`
+				Payload map[string]any `json:"payload"`
+			} `json:"points"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &qr); err != nil {
+		return nil, fmt.Errorf("unmarshal hybrid query result: %w", err)
+	}
+	out := make([]Result, 0, len(qr.Result.Points))
+	for _, p := range qr.Result.Points {
+		meta := make(map[string]string, len(p.Payload))
+		for k, v := range p.Payload {
+			meta[k] = fmt.Sprintf("%v", v)
+		}
+		out = append(out, Result{
+			ID:      fmt.Sprintf("%v", p.ID),
+			Content: meta["content"],
+			Score:   p.Score,
+			Meta:    meta,
+		})
+	}
+	return out, nil
+}
+
+// CollectionHasSparse checks if a collection was created with sparse_vectors
+// config (i.e., supports hybrid search). Used for fallback detection.
+func (q *QdrantClient) CollectionHasSparse(ctx context.Context, key CollectionKey) bool {
+	data, _, err := q.do(ctx, "GET", "/collections/"+key.String(), nil)
+	if err != nil {
+		return false
+	}
+	var info struct {
+		Result struct {
+			Params struct {
+				SparseVectors map[string]any `json:"sparse_vectors"`
+			} `json:"params"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return false
+	}
+	_, has := info.Result.Params.SparseVectors["text"]
+	return has
+}

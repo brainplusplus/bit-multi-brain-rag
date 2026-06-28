@@ -124,6 +124,34 @@ func (s *Server) uiSettingsPanel(c echo.Context) error {
 	sb.WriteString("<div class='muted small' style='margin-top:8px'>The switch is automated: pre-flight check → pull image → stop old → start new → health probe → persist. On failure, auto-rollback to the previous image.</div>")
 	sb.WriteString("</div></div>")
 
+	// Search configuration section (ADR-0008: hybrid search)
+	sb.WriteString("<section class='settings-card' style='margin-top:24px'>")
+	sb.WriteString("<h3>Search configuration</h3>")
+	sb.WriteString("<div class='settings-row'>")
+	sb.WriteString("<div class='settings-row-label'>Hybrid search</div>")
+	sb.WriteString("<div class='settings-row-value'>")
+	hybridVal := s.store.GetSetting(c.Request().Context(), "hybrid_search")
+	if hybridVal == "" {
+		hybridVal = "on" // default
+	}
+	if hybridVal == "on" {
+		sb.WriteString("<span class='badge accent'>enabled</span> <span class='muted small'>dense (voyage-4-nano) + sparse (BM25) + RRF fusion</span>")
+	} else {
+		sb.WriteString("<span class='badge'>disabled</span> <span class='muted small'>dense-only (semantic search)</span>")
+	}
+	// Toggle button
+	toggleMode := "on"
+	toggleLabel := "Enable"
+	if hybridVal == "on" {
+		toggleMode = "off"
+		toggleLabel = "Disable"
+	}
+	sb.WriteString(fmt.Sprintf("<div style='margin-top:8px'><button class='btn btn-sm' hx-post='/ui/settings/hybrid/toggle' hx-vals='{\"mode\":\"%s\"}' hx-target='#main' hx-swap='outerHTML'>%s hybrid</button>", toggleMode, toggleLabel))
+	sb.WriteString("<div class='muted small' style='margin-top:6px'>Hybrid search combines semantic (dense) and keyword (sparse/BM25) retrieval with Reciprocal Rank Fusion. Improves exact identifier matching. Requires re-indexing to take effect.</div>")
+	sb.WriteString("</div>")
+	sb.WriteString("</div></div>")
+	sb.WriteString("</section>")
+
 	sb.WriteString("</section>")
 	sb.WriteString("</div>")
 	return c.HTML(200, sb.String())
@@ -200,3 +228,16 @@ func (s *Server) uiGPUSwitch(c echo.Context) error {
 
 // (keep context import alive for future async switch streaming)
 var _ = context.Background
+
+// uiHybridToggle toggles hybrid search on/off and re-renders the Settings page.
+func (s *Server) uiHybridToggle(c echo.Context) error {
+	mode := c.FormValue("mode")
+	if mode != "on" && mode != "off" {
+		return c.HTML(400, "<div id='main' class='main'><p class='error'>Invalid mode. Use on or off.</p></div>")
+	}
+	if err := s.store.SetSetting(c.Request().Context(), "hybrid_search", mode); err != nil {
+		return c.HTML(500, "<div id='main' class='main'><p class='error'>Failed to save setting: "+template.HTMLEscapeString(err.Error())+"</p></div>")
+	}
+	// Re-render the full settings panel.
+	return s.uiSettingsPanel(c)
+}

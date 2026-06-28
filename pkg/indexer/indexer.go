@@ -45,6 +45,12 @@ type Indexer struct {
 	// falls back to defaultMaxTokensPerChunk. Set by the dashboard from the
 	// active model's EffectiveChunkTokens() at hot-swap time.
 	MaxTokensPerChunk int
+	// HybridEnabled enables BM25 sparse vector generation for hybrid search
+	// (ADR-0008). When true, indexer generates sparse vectors from
+	// symbol+name+file+content and uses IndexWithSparse instead of Index.
+	HybridEnabled bool
+	// bm25 is the lazy-initialized BM25 vectorizer (fitted on first batch).
+	bm25 *rag.BM25Vectorizer
 }
 
 // New constructs an Indexer.
@@ -137,8 +143,27 @@ func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPa
 		Dim:     ix.embed.VectorSize(),
 		Backend: ix.embed.Backend(),
 	}
-	if err := ix.rag.CreateCollection(ctx, key); err != nil {
-		return stats, fmt.Errorf("create collection %s: %w", key, err)
+	if ix.HybridEnabled {
+		// Try hybrid collection (dense + sparse). Falls back to standard
+		// if Qdrant doesn't support sparse_vectors.
+		if qc, ok := ix.rag.(*rag.QdrantClient); ok {
+			if err := qc.CreateCollectionWithSparse(ctx, key); err != nil {
+				ix.logger.Warn("hybrid collection create failed, falling back to dense-only", "error", err)
+				if err := ix.rag.CreateCollection(ctx, key); err != nil {
+					return stats, fmt.Errorf("create collection %s: %w", key, err)
+				}
+				ix.HybridEnabled = false
+			}
+		} else {
+			if err := ix.rag.CreateCollection(ctx, key); err != nil {
+				return stats, fmt.Errorf("create collection %s: %w", key, err)
+			}
+			ix.HybridEnabled = false
+		}
+	} else {
+		if err := ix.rag.CreateCollection(ctx, key); err != nil {
+			return stats, fmt.Errorf("create collection %s: %w", key, err)
+		}
 	}
 
 	// Walk the tree, collecting source files.
@@ -203,11 +228,47 @@ func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPa
 			batch = batch[:0]
 			return nil
 		}
-		if err := ix.rag.Index(ctx, key, docs, vecs); err != nil {
-			stats.Errors = append(stats.Errors, fmt.Sprintf("index batch: %v", err))
+		if ix.HybridEnabled {
+			if qc, ok := ix.rag.(*rag.QdrantClient); ok {
+				// Generate BM25 sparse vectors for hybrid search (ADR-0008).
+				// Fit BM25 on this batch (IDF from batch docs — good enough
+				// approximation for relative weighting within the index).
+				ix.ensureBM25(texts)
+				sparseVecs := make([]*rag.SparseVector, len(docs))
+				for i, d := range docs {
+					sym := d.Meta["symbol"]
+					nm := d.Meta["name"]
+					f := d.Meta["source_file"]
+					sparseVecs[i] = ix.bm25.BuildDocSparse(sym, nm, f, d.Content)
+				}
+				if err := qc.IndexWithSparse(ctx, key, docs, vecs, sparseVecs); err != nil {
+					// Fallback to dense-only on sparse index error.
+					ix.logger.Warn("hybrid index failed, falling back to dense-only", "error", err)
+					if err := ix.rag.Index(ctx, key, docs, vecs); err != nil {
+						stats.Errors = append(stats.Errors, fmt.Sprintf("index batch: %v", err))
+					} else {
+						stats.Indexed += len(docs)
+						stats.Embedded += len(vecs)
+					}
+				} else {
+					stats.Indexed += len(docs)
+					stats.Embedded += len(vecs)
+				}
+			} else {
+				if err := ix.rag.Index(ctx, key, docs, vecs); err != nil {
+					stats.Errors = append(stats.Errors, fmt.Sprintf("index batch: %v", err))
+				} else {
+					stats.Indexed += len(docs)
+					stats.Embedded += len(vecs)
+				}
+			}
 		} else {
-			stats.Indexed += len(docs)
-			stats.Embedded += len(vecs)
+			if err := ix.rag.Index(ctx, key, docs, vecs); err != nil {
+				stats.Errors = append(stats.Errors, fmt.Sprintf("index batch: %v", err))
+			} else {
+				stats.Indexed += len(docs)
+				stats.Embedded += len(vecs)
+			}
 		}
 		batch = batch[:0]
 		return nil
@@ -382,4 +443,16 @@ var sourceExts = map[string]bool{
 
 func isSourceFile(path string) bool {
 	return sourceExts[strings.ToLower(filepath.Ext(path))]
+}
+
+// ensureBM25 lazily initializes + fits the BM25 vectorizer on the first batch.
+// Subsequent calls are no-ops (already fitted). IDF stats from the first batch
+// are a good approximation for relative term weighting within the index.
+func (ix *Indexer) ensureBM25(texts []string) {
+	if ix.bm25 != nil {
+		return
+	}
+	ix.bm25 = rag.NewBM25Vectorizer()
+	ix.bm25.Fit(texts)
+	ix.logger.Info("BM25 vectorizer fitted", "docs", len(texts), "avg_doc_len", ix.bm25.AvgDocLen())
 }

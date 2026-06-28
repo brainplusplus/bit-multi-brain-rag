@@ -259,7 +259,12 @@ func (s *Server) renderProjectDetail(p store.Project, jobPartial string) string 
 }
 
 func (s *Server) renderResults(query string, results []rag.Result) string {
-	sb := fmt.Sprintf("<h3>Results for &ldquo;%s&rdquo;</h3>", template.HTMLEscapeString(query))
+	// Search mode badge (hybrid or dense-only)
+	modeBadge := "<span class='badge'>dense</span>"
+	if s.hybridEnabled() {
+		modeBadge = "<span class='badge accent'>hybrid</span>"
+	}
+	sb := fmt.Sprintf("<h3>Results for &ldquo;%s&rdquo; %s</h3>", template.HTMLEscapeString(query), modeBadge)
 	if len(results) == 0 {
 		sb += "<p class='muted'>No results found.</p>"
 		return sb

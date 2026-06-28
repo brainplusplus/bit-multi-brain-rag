@@ -234,6 +234,7 @@ func (s *Server) hotSwapEmbedder(model store.EmbeddingModel) error {
 	// Rebuild indexer with new embedder + per-model chunk size.
 	idx := indexer.New(chunker.New(), client, s.rag, s.logger)
 	idx.MaxTokensPerChunk = model.EffectiveChunkTokens()
+	idx.HybridEnabled = s.indexer.HybridEnabled // preserve hybrid setting across hot-swap
 	s.indexer = idx
 	embedMu.Unlock()
 	s.logger.Info("hot-swapped embedder",
