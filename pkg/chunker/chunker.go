@@ -55,12 +55,15 @@ type Chunk struct {
 
 // Chunker splits source files into embeddable chunks.
 type Chunker struct {
-	MaxChunkLines int // fallback chunk size for languages without a grammar (default 60)
+	MaxChunkLines  int // fallback chunk size for languages without a grammar (default 60)
+	MaxChunkBytes  int // hard limit: chunks exceeding this are split by lines (default 6000 ≈ 1500 tokens)
 }
 
 // New creates a Chunker with sensible defaults.
+// MaxChunkBytes: 4500 ≈ 1600 tokens (llama embedder limit is 2048 tokens;
+// code averages ~2.8 bytes/token. 4500 stays safely under the limit).
 func New() *Chunker {
-	return &Chunker{MaxChunkLines: 60}
+	return &Chunker{MaxChunkLines: 60, MaxChunkBytes: 4500}
 }
 
 // languageInfo maps a language to its tree-sitter language + the AST node types
@@ -233,28 +236,20 @@ func (ch *Chunker) chunkAST(ctx context.Context, source []byte, sourceFile strin
 		if _, isDef := defSet[nodeType]; !isDef {
 			continue
 		}
-		chunk := nodeToChunk(source, sourceFile, info.name, child)
-		chunks = append(chunks, chunk)
+		chunks = append(chunks, ch.nodeToChunk(source, sourceFile, info.name, child)...)
 	}
 
 	// If no definitions were found (e.g. a file with only loose statements),
-	// fall back to indexing the whole file as one chunk.
+	// fall back to naive line-based chunking.
 	if len(chunks) == 0 {
-		chunks = []Chunk{{
-			Content:   string(source),
-			SourceFile: sourceFile,
-			Language:  info.name,
-			Symbol:    "file",
-			Name:      filepath.Base(sourceFile),
-			StartLine: 1,
-			EndLine:   countLines(source),
-		}}
+		return ch.chunkNaive(source, sourceFile, "."+info.name), nil
 	}
 	return chunks, nil
 }
 
 // nodeToChunk converts a tree-sitter node into a Chunk.
-func nodeToChunk(source []byte, sourceFile, lang string, n *sitter.Node) Chunk {
+// If the node exceeds MaxChunkBytes, it is split into multiple line-based sub-chunks.
+func (ch *Chunker) nodeToChunk(source []byte, sourceFile, lang string, n *sitter.Node) []Chunk {
 	start := int(n.StartByte())
 	end := int(n.EndByte())
 	if start < 0 {
@@ -264,15 +259,65 @@ func nodeToChunk(source []byte, sourceFile, lang string, n *sitter.Node) Chunk {
 		end = len(source)
 	}
 	content := string(source[start:end])
-	return Chunk{
-		Content:   content,
-		SourceFile: sourceFile,
-		Language:  lang,
-		Symbol:    n.Type(),
-		Name:      extractName(source, n),
-		StartLine: int(n.StartPoint().Row) + 1,
-		EndLine:   int(n.EndPoint().Row) + 1,
+	symbol := n.Type()
+	name := extractName(source, n)
+	startLine := int(n.StartPoint().Row) + 1
+	endLine := int(n.EndPoint().Row) + 1
+
+	maxBytes := ch.MaxChunkBytes
+	if maxBytes <= 0 {
+		maxBytes = 6000
 	}
+
+	// If within limit, return single chunk.
+	if len(content) <= maxBytes {
+		return []Chunk{{
+			Content:   content,
+			SourceFile: sourceFile,
+			Language:  lang,
+			Symbol:    symbol,
+			Name:      name,
+			StartLine: startLine,
+			EndLine:   endLine,
+		}}
+	}
+
+	// Split large node by lines into sub-chunks under maxBytes.
+	lines := strings.Split(content, "\n")
+	var chunks []Chunk
+	chunkStart := 0
+	currentBytes := 0
+	for i, line := range lines {
+		lineBytes := len(line) + 1 // +1 for newline
+		if currentBytes+lineBytes > maxBytes && i > chunkStart {
+			// Flush current chunk.
+			chunks = append(chunks, Chunk{
+				Content:   strings.Join(lines[chunkStart:i], "\n"),
+				SourceFile: sourceFile,
+				Language:  lang,
+				Symbol:    symbol,
+				Name:      fmt.Sprintf("%s (part %d)", name, len(chunks)+1),
+				StartLine: startLine + chunkStart,
+				EndLine:   startLine + i - 1,
+			})
+			chunkStart = i
+			currentBytes = 0
+		}
+		currentBytes += lineBytes
+	}
+	// Flush remaining lines.
+	if chunkStart < len(lines) {
+		chunks = append(chunks, Chunk{
+			Content:   strings.Join(lines[chunkStart:], "\n"),
+			SourceFile: sourceFile,
+			Language:  lang,
+			Symbol:    symbol,
+			Name:      fmt.Sprintf("%s (part %d)", name, len(chunks)+1),
+			StartLine: startLine + chunkStart,
+			EndLine:   endLine,
+		})
+	}
+	return chunks
 }
 
 // extractName returns the first identifier-like child as the symbol name.
@@ -309,18 +354,32 @@ func (ch *Chunker) chunkNaive(source []byte, sourceFile, ext string) []Chunk {
 	if chunkSize <= 0 {
 		chunkSize = 60
 	}
+	maxBytes := ch.MaxChunkBytes
+	if maxBytes <= 0 {
+		maxBytes = 4500
+	}
 	lang := strings.TrimPrefix(ext, ".")
 	if lang == "" {
 		lang = "text"
 	}
 	var chunks []Chunk
-	for start := 0; start < len(lines); start += chunkSize {
+	for start := 0; start < len(lines); {
 		end := start + chunkSize
 		if end > len(lines) {
 			end = len(lines)
 		}
+		content := strings.Join(lines[start:end], "\n")
+		// If chunk exceeds byte limit, shrink it line by line.
+		for len(content) > maxBytes && end > start+1 {
+			end--
+			content = strings.Join(lines[start:end], "\n")
+		}
+		// If single line exceeds limit, truncate it (rare but possible).
+		if len(content) > maxBytes {
+			content = content[:maxBytes]
+		}
 		chunks = append(chunks, Chunk{
-			Content:   strings.Join(lines[start:end], "\n"),
+			Content:   content,
 			SourceFile: sourceFile,
 			Language:  lang,
 			Symbol:    "chunk",
@@ -328,6 +387,7 @@ func (ch *Chunker) chunkNaive(source []byte, sourceFile, ext string) []Chunk {
 			StartLine: start + 1,
 			EndLine:   end,
 		})
+		start = end
 	}
 	return chunks
 }

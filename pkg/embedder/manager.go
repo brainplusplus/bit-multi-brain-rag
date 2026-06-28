@@ -24,12 +24,14 @@ import (
 
 // Config holds embedder binary configuration.
 type Config struct {
-	BinaryPath string   // path to llama-server (or llama-server.exe)
-	ModelPath  string   // path to voyage-4-nano Q8 GGUF
-	Port       int      // HTTP port (default 8080)
-	APIKey     string   // LLAMA_API_KEY for auth
-	GPU        bool     // enable GPU (nvidia)
-	ExtraArgs  []string // additional CLI args
+	BinaryPath    string   // path to llama-server (or llama-server.exe) — active binary
+	ModelPath     string   // path to voyage-4-nano Q8 GGUF
+	Port          int      // HTTP port (default 8080)
+	APIKey        string   // LLAMA_API_KEY for auth
+	GPU           bool     // enable GPU (nvidia)
+	ExtraArgs     []string // additional CLI args
+	GPUBinaryPath string   // path to GPU-enabled binary (dual mode)
+	CPUBinaryPath string   // path to CPU-only binary (dual mode)
 }
 
 // Manager manages the embedder child process lifecycle.
@@ -107,8 +109,20 @@ func (m *Manager) Stop() {
 }
 
 // SetGPU toggles GPU mode for next Start() call.
+// In dual-binary mode, swaps BinaryPath to the appropriate binary.
 func (m *Manager) SetGPU(enable bool) {
 	m.cfg.GPU = enable
+	// Swap binary path in dual mode
+	if enable && m.cfg.GPUBinaryPath != "" {
+		m.cfg.BinaryPath = m.cfg.GPUBinaryPath
+	} else if !enable && m.cfg.CPUBinaryPath != "" {
+		m.cfg.BinaryPath = m.cfg.CPUBinaryPath
+	}
+}
+
+// HasDualBinary returns true if both GPU and CPU binaries are configured.
+func (m *Manager) HasDualBinary() bool {
+	return m.cfg.GPUBinaryPath != "" && m.cfg.CPUBinaryPath != ""
 }
 
 // isHealthy checks if the embedder HTTP endpoint responds.

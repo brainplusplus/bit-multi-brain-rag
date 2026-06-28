@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html/template"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -129,8 +130,23 @@ func (s *Server) buildSettingsHTML(c echo.Context) string {
 			}
 			sb.WriteString("<div class='muted small' style='margin-top:8px'>Restarts the local llama-server with/without GPU acceleration.</div>")
 			sb.WriteString("</div></div>")
+		} else if s.cfg.EmbedderGPUBinary != "" && s.cfg.EmbedderCPUBinary != "" {
+			// Dual-binary mode: show switch buttons
+			sb.WriteString("<div class='settings-row' style='border-top:1px solid var(--border);padding-top:16px;margin-top:16px'>")
+			sb.WriteString("<div class='settings-row-label'>Switch runtime</div>")
+			sb.WriteString("<div class='settings-row-value'>")
+			if st.CurrentMode == "gpu" {
+				sb.WriteString("<button class='btn' hx-post='/api/v1/embedder/switch' hx-vals='{\"mode\":\"cpu\"}' hx-target='#main' hx-swap='outerHTML' hx-confirm='Switch to CPU embedder binary?'>Switch to CPU</button>")
+			} else {
+				canSwitch := st.Detected
+				btnAttrs := ""
+				if !canSwitch { btnAttrs = " disabled title='GPU not detected'" }
+				sb.WriteString(fmt.Sprintf("<button class='btn'%s hx-post='/api/v1/embedder/switch' hx-vals='{\"mode\":\"gpu\"}' hx-target='#main' hx-swap='outerHTML' hx-confirm='Switch to GPU embedder binary?'>Switch to GPU</button>", btnAttrs))
+			}
+			sb.WriteString("<div class='muted small' style='margin-top:8px'>Dual binary: GPU=" + template.HTMLEscapeString(filepath.Base(s.cfg.EmbedderGPUBinary)) + ", CPU=" + template.HTMLEscapeString(filepath.Base(s.cfg.EmbedderCPUBinary)) + "</div>")
+			sb.WriteString("</div></div>")
 		} else {
-			sb.WriteString("<div class='muted small' style='margin-top:16px;padding-top:16px;border-top:1px solid var(--border)'>Set <code>EMBEDDER_BINARY</code> to enable GPU/CPU switching for the local embedder.</div>")
+			sb.WriteString("<div class='muted small' style='margin-top:16px;padding-top:16px;border-top:1px solid var(--border)'>Set <code>EMBEDDER_GPU_BINARY</code> + <code>EMBEDDER_CPU_BINARY</code> (or <code>EMBEDDER_BINARY</code>) to enable GPU/CPU switching.</div>")
 		}
 
 		// Cloud embedder provider (informational)

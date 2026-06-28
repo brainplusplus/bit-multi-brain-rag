@@ -156,13 +156,30 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// Otherwise use the configured HTTP endpoint (Docker or remote).
 	embEndpoint := cfg.EmbeddingEndpoint
 	var embMgr *embedder.Manager
-	if cfg.EmbedderBinary != "" && cfg.EmbedderModel != "" {
+
+	// Determine which embedder binary to use.
+	// Dual-binary mode: EMBEDDER_GPU_BINARY + EMBEDDER_CPU_BINARY both set.
+	// Single mode: EMBEDDER_BINARY only.
+	embBinary := cfg.EmbedderBinary
+	useGPU := cfg.EmbedderGPU
+	if cfg.EmbedderGPUBinary != "" && cfg.EmbedderCPUBinary != "" {
+		// Dual mode: pick based on current setting
+		if useGPU {
+			embBinary = cfg.EmbedderGPUBinary
+		} else {
+			embBinary = cfg.EmbedderCPUBinary
+		}
+	}
+
+	if embBinary != "" && cfg.EmbedderModel != "" {
 		embMgr = embedder.New(embedder.Config{
-			BinaryPath: cfg.EmbedderBinary,
-			ModelPath:  cfg.EmbedderModel,
-			Port:       8080,
-			APIKey:     cfg.EmbeddingAPIKey,
-			GPU:        cfg.EmbedderGPU,
+			BinaryPath:      embBinary,
+			ModelPath:       cfg.EmbedderModel,
+			Port:            8080,
+			APIKey:          cfg.EmbeddingAPIKey,
+			GPU:             useGPU,
+			GPUBinaryPath:   cfg.EmbedderGPUBinary,
+			CPUBinaryPath:   cfg.EmbedderCPUBinary,
 		}, logger)
 		endpoint, err := embMgr.Start(context.Background())
 		if err != nil {

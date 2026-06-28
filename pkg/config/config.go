@@ -44,9 +44,13 @@ type Config struct {
 	// --- Embedder binary (zero-setup mode) ---
 	// If EmbedderBinary is set, dashboard starts llama-server as child process.
 	// No Docker needed for embedding.
-	EmbedderBinary string // path to llama-server binary
-	EmbedderModel  string // path to GGUF model file
-	EmbedderGPU    bool   // enable GPU layers
+	// Dual-binary mode: set both EmbedderGPUBinary and EmbedderCPUBinary to
+	// enable runtime switching between GPU/CPU from the settings UI.
+	EmbedderBinary   string // path to llama-server binary (single mode)
+	EmbedderGPUBinary string // path to GPU-enabled llama-server (dual mode)
+	EmbedderCPUBinary string // path to CPU-only llama-server (dual mode)
+	EmbedderModel    string // path to GGUF model file
+	EmbedderGPU      bool   // enable GPU layers
 
 	// --- SQLite (project metadata store) ---
 	DBPath string // path to SQLite database file (default "data/dashboard.db")
@@ -78,6 +82,8 @@ func Load() (*Config, error) {
 		QdrantAPIKey:       getEnv("QDRANT_API_KEY", ""),
 		ZvecPath:           getEnv("ZVEC_PATH", ""),
 		EmbedderBinary:     getEnv("EMBEDDER_BINARY", ""),
+		EmbedderGPUBinary:  getEnv("EMBEDDER_GPU_BINARY", ""),
+		EmbedderCPUBinary:  getEnv("EMBEDDER_CPU_BINARY", ""),
 		EmbedderModel:      getEnv("EMBEDDER_MODEL", ""),
 		EmbedderGPU:        getEnvBool("EMBEDDER_GPU", false),
 		DBPath:             getEnv("DB_PATH", "data/dashboard.db"),
