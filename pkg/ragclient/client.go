@@ -163,3 +163,104 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// --- Project management + indexing (ADR-0007 Phase 9) ---
+
+// Project represents a registered project in the dashboard.
+type Project struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	RootPath    string `json:"root_path"`
+	Description string `json:"description"`
+	Domains     string `json:"domains"`
+}
+
+// ListProjects returns all registered projects.
+func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
+	url := c.baseURL + "/api/v1/projects"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: do request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("ragclient: dashboard %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var out struct {
+		Projects []Project `json:"projects"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("ragclient: decode: %w", err)
+	}
+	return out.Projects, nil
+}
+
+// IndexProject triggers a background indexing job for the given project.
+// Returns immediately with job info (status will be queued/running).
+func (c *Client) IndexProject(ctx context.Context, project string) (string, error) {
+	body, _ := json.Marshal(map[string]string{"project": project})
+	url := c.baseURL + "/api/v1/index"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("ragclient: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ragclient: do request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("ragclient: dashboard %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var out struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("ragclient: decode: %w", err)
+	}
+	return out.ID, nil
+}
+
+// IndexStatus holds a snapshot of an indexing job's progress.
+type IndexStatus struct {
+	Status      string   `json:"status"`
+	FilesDone   int      `json:"files_done"`
+	FilesTotal  int      `json:"files_total"`
+	ChunksDone  int      `json:"chunks_done"`
+	IndexedDone int      `json:"indexed_done"`
+	Errors      []string `json:"errors"`
+}
+
+// GetIndexStatus polls the status of the most recent indexing job for a project.
+func (c *Client) GetIndexStatus(ctx context.Context, project string) (*IndexStatus, error) {
+	url := c.baseURL + "/api/v1/index/status?project=" + project
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: do request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("ragclient: dashboard %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var out IndexStatus
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("ragclient: decode: %w", err)
+	}
+	return &out, nil
+}

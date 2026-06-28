@@ -65,8 +65,11 @@ func New(client *ragclient.Client, logger *slog.Logger) *Server {
 		tools:  make(map[string]Tool),
 		logger: logger,
 	}
-	// Register phase 1 tools.
+	// Register tools (ADR-0007 Phase 9 expansion).
 	s.Register(&CodeRAGTool{client: client})
+	s.Register(&RetrieveContextTool{client: client})
+	s.Register(&IndexProjectTool{client: client})
+	s.Register(&ListProjectsTool{client: client})
 	return s
 }
 
@@ -268,4 +271,173 @@ func formatResults(query, project string, results []rag.Result) string {
 		sb.WriteString("\n```\n\n")
 	}
 	return sb.String()
+}
+
+// --- RetrieveContextTool ---
+
+// RetrieveContextTool returns search results pre-formatted as a ready-to-paste
+// context string for LLM consumption. Inspired by enowx-rag's rag_retrieve_context.
+type RetrieveContextTool struct {
+	client *ragclient.Client
+}
+
+func (t *RetrieveContextTool) Name() string { return "rag_retrieve_context" }
+
+func (t *RetrieveContextTool) Description() string {
+	return "Semantic search that returns results as a pre-formatted context string " +
+		"with [score] prefixes, ready to paste into an LLM prompt. " +
+		"Use this before writing code to find relevant existing implementations."
+}
+
+func (t *RetrieveContextTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"project": map[string]any{
+				"type":        "string",
+				"description": "Project name to search within.",
+			},
+			"query": map[string]any{
+				"type":        "string",
+				"description": "Natural-language query describing what you're looking for.",
+			},
+			"limit": map[string]any{
+				"type":        "integer",
+				"description": "Max results (default 5).",
+				"default":     5,
+			},
+		},
+		"required": []string{"project", "query"},
+	}
+}
+
+func (t *RetrieveContextTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
+	project, _ := args["project"].(string)
+	query, _ := args["query"].(string)
+	if project == "" || query == "" {
+		return ToolResult{}, fmt.Errorf("project and query are required")
+	}
+	limit := 5
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	results, err := t.client.Search(ctx, project, query, limit)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	return ToolResult{
+		Content: []ContentBlock{{Type: "text", Text: formatContext(query, project, results)}},
+	}, nil
+}
+
+// formatContext renders results as a compact context string with [score] prefixes.
+// Format matches enowx-rag's rag_retrieve_context for familiarity.
+func formatContext(query, project string, results []rag.Result) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Context for %q (project: %s, %d results):\n\n", query, project, len(results)))
+	if len(results) == 0 {
+		sb.WriteString("(no relevant context found)\n")
+		return sb.String()
+	}
+	for _, r := range results {
+		file := r.Meta["source_file"]
+		if file == "" {
+			file = "(unknown)"
+		}
+		lines := r.Meta["start_line"] + "-" + r.Meta["end_line"]
+		sb.WriteString(fmt.Sprintf("[score %.3f] %s:%s (%s)\n", r.Score, file, lines, r.Meta["name"]))
+		sb.WriteString(r.Content)
+		sb.WriteString("\n\n")
+	}
+	return sb.String()
+}
+
+// --- IndexProjectTool ---
+
+// IndexProjectTool triggers a background indexing job for a project via the
+// dashboard API. Returns job ID + initial status. Polling is the agent's
+// responsibility (use rag_list_projects to check or just wait ~30s).
+type IndexProjectTool struct {
+	client *ragclient.Client
+}
+
+func (t *IndexProjectTool) Name() string { return "rag_index_project" }
+
+func (t *IndexProjectTool) Description() string {
+	return "Trigger background indexing for a project (re-index all source files). " +
+		"Returns immediately with job status. Use after significant code changes " +
+		"to keep the RAG index fresh."
+}
+
+func (t *IndexProjectTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"project": map[string]any{
+				"type":        "string",
+				"description": "Project name to index (must already be registered in the dashboard).",
+			},
+		},
+		"required": []string{"project"},
+	}
+}
+
+func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
+	project, _ := args["project"].(string)
+	if project == "" {
+		return ToolResult{}, fmt.Errorf("project is required")
+	}
+	jobID, err := t.client.IndexProject(ctx, project)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	return ToolResult{
+		Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+			"Indexing started for project %q. Job ID: %s\nStatus: queued (check dashboard for progress).\n"+
+				"Indexing runs in background; search will reflect new content once complete (~30s for small projects).",
+			project, jobID)}},
+	}, nil
+}
+
+// --- ListProjectsTool ---
+
+// ListProjectsTool returns all registered projects. Useful for agents to
+// discover available project names before calling rag_search_code.
+type ListProjectsTool struct {
+	client *ragclient.Client
+}
+
+func (t *ListProjectsTool) Name() string { return "rag_list_projects" }
+
+func (t *ListProjectsTool) Description() string {
+	return "List all registered projects in the bit-multi-brain-rag dashboard. " +
+		"Use this to discover available project names for rag_search_code."
+}
+
+func (t *ListProjectsTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
+}
+
+func (t *ListProjectsTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
+	projects, err := t.client.ListProjects(ctx)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	var sb strings.Builder
+	if len(projects) == 0 {
+		sb.WriteString("No projects registered. Create a project via the dashboard UI first.\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("Registered projects (%d):\n\n", len(projects)))
+		sb.WriteString("| Name | Root Path | Domains |\n")
+		sb.WriteString("|------|-----------|--------|\n")
+		for _, p := range projects {
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n", p.Name, p.RootPath, p.Domains))
+		}
+	}
+	return ToolResult{
+		Content: []ContentBlock{{Type: "text", Text: sb.String()}},
+	}, nil
 }

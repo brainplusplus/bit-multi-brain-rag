@@ -14,6 +14,7 @@ Project: **bit-multi-brain-rag**
 | [0006](0006-gpu-embedding-acceleration.md) | GPU Embedding Acceleration | Accepted | 2026-06-28 |
 | [0007](0007-gap-analysis-and-improvement-roadmap.md) | Gap Analysis & Improvement Roadmap | Accepted | 2026-06-28 |
 | [0008](0008-hybrid-search-dense-sparse-rrf.md) | Hybrid Search (Dense + Sparse + RRF Fusion) | Accepted | 2026-06-28 |
+| [0009](0009-cocoindex-code-reference-analysis.md) | cocoindex-code Reference Analysis | Accepted | 2026-06-28 |
 
 ## Conventions
 
