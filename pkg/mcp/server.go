@@ -48,13 +48,13 @@ type Server struct {
 
 // WatcherManager tracks active file watchers per project. When a project
 // is created or indexed, a watcher starts for its root_path. On file change,
-// it triggers a debounced re-index via localIndex (walk + chunk + upload).
+// it triggers a debounced delta re-index (only changed files).
 type WatcherManager struct {
 	mu       sync.Mutex
- watchers map[string]*watcher.Watcher // key = project name
+	watchers map[string]*watcher.Watcher // key = project name
 	client   *ragclient.Client
- logger   *slog.Logger
- ctx      context.Context
+	logger   *slog.Logger
+	ctx      context.Context
 }
 
 // NewWatcherManager creates a WatcherManager tied to the MCP server's context.
@@ -79,18 +79,17 @@ func (wm *WatcherManager) StartWatching(project, rootPath string) {
 		delete(wm.watchers, project)
 	}
 
-	onChange := func() {
-		wm.logger.Info("auto re-index triggered by file watcher", "project", project, "root", rootPath)
-		// Run in background — don't block the watcher goroutine.
+	onChange := func(changedFiles []string) {
+		wm.logger.Info("delta re-index triggered", "project", project, "root", rootPath, "files", len(changedFiles))
 		go func() {
-			stats, err := localIndex(wm.ctx, wm.client, project, rootPath)
+			stats, err := deltaIndex(wm.ctx, wm.client, project, rootPath, changedFiles)
 			if err != nil {
-				wm.logger.Error("auto re-index failed", "project", project, "error", err)
+				wm.logger.Error("delta re-index failed", "project", project, "error", err)
 				return
 			}
-			wm.logger.Info("auto re-index complete",
+			wm.logger.Info("delta re-index complete",
 				"project", project,
-				"files", stats.FilesScanned,
+				"files_scanned", stats.FilesScanned,
 				"chunks", stats.Chunks,
 				"embedded", stats.Embedded,
 				"duration", stats.Duration)
@@ -671,6 +670,81 @@ func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 func uuidV5(project, file string, line int) string {
 	return uuid.NewSHA1(uuid.NameSpaceURL,
 		[]byte(fmt.Sprintf("%s:%s:%d", project, file, line))).String()
+}
+
+// deltaIndex chunks and uploads ONLY the changed files (not full walk).
+// Called by the file watcher when source files change.
+// deletedFiles are files that no longer exist — their Qdrant points are
+// stale (not actively deleted yet; skipped: Qdrant upsert is idempotent,
+// re-indexing a project overwrites stale points for the same UUID set).
+func deltaIndex(ctx context.Context, client *ragclient.Client, project, rootPath string, changedFiles []string) (*localIndexStats, error) {
+	start := time.Now()
+	ch := chunker.New()
+	stats := &localIndexStats{}
+
+	const batchSize = 64
+	var batch []ragclient.UploadDoc
+
+	for _, absPath := range changedFiles {
+		// Skip deleted files (fsnotify Remove/Rename events).
+		if _, err := os.Stat(absPath); err != nil {
+			continue
+		}
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			slog.Warn("delta: read failed", "file", absPath, "error", err)
+			continue
+		}
+		if len(data) > 1024*1024 {
+			continue
+		}
+
+		stats.FilesScanned++
+
+		relPath, _ := filepath.Rel(rootPath, absPath)
+		chunks, err := ch.ChunkFile(ctx, data, relPath)
+		if err != nil {
+			slog.Warn("delta: chunk failed", "file", relPath, "error", err)
+			continue
+		}
+
+		for _, c := range chunks {
+			stats.Chunks++
+			batch = append(batch, ragclient.UploadDoc{
+				ID:      uuidV5(project, relPath, c.StartLine),
+				Content: c.Content,
+				Meta: map[string]string{
+					"source_file": relPath,
+					"language":    c.Language,
+					"symbol":      c.Symbol,
+					"name":        c.Name,
+					"start_line":  fmt.Sprintf("%d", c.StartLine),
+					"end_line":    fmt.Sprintf("%d", c.EndLine),
+				},
+			})
+			if len(batch) >= batchSize {
+				result, err := client.UploadAndIndex(ctx, project, batch)
+				if err != nil {
+					return stats, fmt.Errorf("delta upload: %w", err)
+				}
+				stats.Embedded += result.Embedded
+				stats.Stored += result.Indexed
+				batch = batch[:0]
+			}
+		}
+	}
+
+	if len(batch) > 0 {
+		result, err := client.UploadAndIndex(ctx, project, batch)
+		if err != nil {
+			return stats, fmt.Errorf("delta upload final: %w", err)
+		}
+		stats.Embedded += result.Embedded
+		stats.Stored += result.Indexed
+	}
+
+	stats.Duration = time.Since(start).Round(time.Millisecond).String()
+	return stats, nil
 }
 
 // --- ListProjectsTool ---

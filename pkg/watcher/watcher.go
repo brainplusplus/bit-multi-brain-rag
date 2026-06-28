@@ -29,15 +29,16 @@ type Watcher struct {
 	fw       *fsnotify.Watcher
 	root     string
 	logger   *slog.Logger
-	onChange func() // debounced callback (e.g., enqueue index job)
+	onChange func(changed []string) // debounced callback with list of changed files
 	debounce time.Duration
 	cancel   context.CancelFunc
 	done     chan struct{}
 }
 
 // New creates a watcher for rootPath. Call Start() to begin monitoring.
-// onChange is called (at most once per debounce window) when source files change.
-func New(rootPath string, onChange func(), logger *slog.Logger) (*Watcher, error) {
+// onChange is called (at most once per debounce window) with the list of
+// changed source file paths (absolute).
+func New(rootPath string, onChange func(changed []string), logger *slog.Logger) (*Watcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -63,6 +64,24 @@ func (w *Watcher) Start(ctx context.Context) {
 
 	var timer *time.Timer
 	var timerMu sync.Mutex
+	changedFiles := make(map[string]struct{}) // dedup changed paths
+
+	fire := func() {
+		timerMu.Lock()
+		files := make([]string, 0, len(changedFiles))
+		for f := range changedFiles {
+			files = append(files, f)
+		}
+		changedFiles = make(map[string]struct{})
+		timer = nil
+		timerMu.Unlock()
+
+		if len(files) > 0 {
+			w.logger.Info("file changes detected, triggering delta re-index",
+				"root", w.root, "files_changed", len(files))
+			w.onChange(files)
+		}
+	}
 
 	for {
 		select {
@@ -84,15 +103,14 @@ func (w *Watcher) Start(ctx context.Context) {
 				}
 				continue
 			}
-			// Debounce: reset timer on each event, fire once after quiet period.
+			// Collect changed file, dedup.
 			timerMu.Lock()
+			changedFiles[event.Name] = struct{}{}
+			// Debounce: reset timer on each event, fire once after quiet period.
 			if timer != nil {
 				timer.Stop()
 			}
-			timer = time.AfterFunc(w.debounce, func() {
-				w.logger.Info("file changes detected, triggering re-index", "root", w.root)
-				w.onChange()
-			})
+			timer = time.AfterFunc(w.debounce, fire)
 			timerMu.Unlock()
 
 		case err, ok := <-w.fw.Errors:
