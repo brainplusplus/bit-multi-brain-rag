@@ -55,6 +55,9 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
   CMD curl -f http://localhost:8080/health || exit 1
 
 # Use shell-form to expand $N_GPU_LAYERS. Flags voyage-4-nano:
+#   --ubatch-size 2048 must be >= max chunk tokens (EffectiveChunkTokens = 2000)
+#     to avoid "input too large to process" errors from llama.cpp.
+#   --n-gpu-layers 99 offloads all layers to GPU (ignored on CPU image).
 ENTRYPOINT ["/bin/sh", "-c", "exec /app/llama-server \
     --model /models/voyage-4-nano-q8_0.gguf \
     --embedding \
@@ -63,6 +66,7 @@ ENTRYPOINT ["/bin/sh", "-c", "exec /app/llama-server \
     --port 8080 \
     --host 0.0.0.0 \
     --ctx-size 32768 \
+    --ubatch-size 2048 \
     --threads -1 \
     --parallel 4 \
     --cont-batching \

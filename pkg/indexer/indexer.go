@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -24,9 +25,12 @@ import (
 )
 
 // charsPerToken is a conservative chars-to-tokens estimate for code.
-// Observed: BPE tokenizers on Go/Python emit ~2.5 tokens per char for
-// symbol-dense code. We use 2 to leave headroom against pathological inputs.
-const charsPerToken = 2
+// Observed on voyage-4-nano / BPE tokenizers:
+//   - Natural language: ~4 chars/token
+//   - Code (Go/Python): ~3 chars/token average, down to ~2 for symbol-dense code
+// We use 3 to stay conservative — overestimating tokens ensures chunks
+// stay under the embedder's ubatch-size limit.
+const charsPerToken = 3
 
 // defaultMaxTokensPerChunk is the legacy fallback when the active model has
 // no curated MaxContextTokens (and thus EffectiveChunkTokens returns 400).
@@ -394,6 +398,40 @@ func splitOversized(project string, docs []rag.Document, maxTokens int) []rag.Do
 			buf.Reset()
 		}
 		for _, ln := range lines {
+			// Hard-split single lines that exceed maxChars on their own
+			// (minified/generated code). Splits at rune boundaries.
+			if len(ln) > maxChars {
+				// Flush any accumulated buffer first.
+				if buf.Len() > 0 {
+					flushSub(curLine - 1)
+					startLine = curLine
+				}
+				// Split the long line into maxChars-sized pieces.
+				remaining := ln
+				for len(remaining) > maxChars {
+					// Find a safe split point (don't break multibyte runes).
+					cut := maxChars
+					for cut > 0 && !utf8.RuneStart(remaining[cut]) {
+						cut--
+					}
+					piece := remaining[:cut]
+					remaining = remaining[cut:]
+					sub := d
+					sub.Content = piece
+					sub.Meta = cloneMeta(d.Meta)
+					sub.Meta["start_line"] = fmt.Sprintf("%d", curLine)
+					sub.Meta["end_line"] = fmt.Sprintf("%d", curLine)
+					sub.ID = pointID(project, d.Meta["source_file"], curLine)
+					out = append(out, sub)
+					startLine = curLine
+				}
+				if len(remaining) > 0 {
+					buf.WriteString(remaining)
+					buf.WriteByte('\n')
+				}
+				curLine++
+				continue
+			}
 			if buf.Len()+len(ln)+1 > maxChars && buf.Len() > 0 {
 				flushSub(curLine - 1)
 				startLine = curLine
@@ -403,6 +441,19 @@ func splitOversized(project string, docs []rag.Document, maxTokens int) []rag.Do
 			curLine++
 		}
 		flushSub(curLine - 1)
+	}
+	// Final safety pass: any chunk still > maxChars (e.g. pathological
+	// multibyte content) gets truncated to the limit. Better to index a
+	// truncated chunk than to fail the entire batch.
+	for i, d := range out {
+		if len(d.Content) > maxChars {
+			// Truncate at rune boundary.
+			cut := maxChars
+			for cut > 0 && !utf8.RuneStart(d.Content[cut]) {
+				cut--
+			}
+			out[i].Content = d.Content[:cut]
+		}
 	}
 	return out
 }
