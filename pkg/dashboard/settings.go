@@ -25,7 +25,9 @@ func (s *Server) buildSettingsHTML(c echo.Context) string {
 	st := detectGPU(c.Request().Context())
 	st.CurrentMode = s.store.GetSetting(c.Request().Context(), "embedder_mode")
 	if st.CurrentMode == "" {
-		if embeddedMode {
+		if s.cfg.EmbedderGPU {
+			st.CurrentMode = "gpu"
+		} else if embeddedMode {
 			st.CurrentMode = "local"
 		} else {
 			st.CurrentMode = "cpu"

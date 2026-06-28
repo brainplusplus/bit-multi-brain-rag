@@ -65,6 +65,17 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 		"--port", fmt.Sprintf("%d", m.cfg.Port),
 		"--pooling", "mean",
 		"--host", "127.0.0.1",
+		"--embedding",
+		"--no-webui",
+		"--ctx-size", "8192",
+		"--ubatch-size", "2048",
+		"--batch-size", "2048",
+	}
+	// llama.app installer uses subcommand format: "llama serve --model ..."
+	// Traditional llama-server uses: "llama-server --model ..."
+	binaryName := filepath.Base(m.cfg.BinaryPath)
+	if binaryName == "llama.exe" || binaryName == "llama" {
+		args = append([]string{"serve"}, args...)
 	}
 	if m.cfg.GPU {
 		args = append(args, "--n-gpu-layers", "999")

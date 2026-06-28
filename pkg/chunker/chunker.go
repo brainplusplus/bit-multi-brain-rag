@@ -60,10 +60,10 @@ type Chunker struct {
 }
 
 // New creates a Chunker with sensible defaults.
-// MaxChunkBytes: 4500 ≈ 1600 tokens (llama embedder limit is 2048 tokens;
-// code averages ~2.8 bytes/token. 4500 stays safely under the limit).
+// MaxChunkBytes: 3000 ≈ 1500 tokens (llama embedder limit is 2048 tokens for
+// ubatch-size 2048; code averages ~1.9 bytes/token. 3000 stays safely under).
 func New() *Chunker {
-	return &Chunker{MaxChunkLines: 60, MaxChunkBytes: 4500}
+	return &Chunker{MaxChunkLines: 60, MaxChunkBytes: 3000}
 }
 
 // languageInfo maps a language to its tree-sitter language + the AST node types
