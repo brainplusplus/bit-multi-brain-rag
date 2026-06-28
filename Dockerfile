@@ -58,6 +58,8 @@ RUN apk add --no-cache \
         ca-certificates \
         tzdata \
         wget \
+        libstdc++ \
+        libgcc \
     && addgroup -S app \
     && adduser -S -G app -h /app app
 
