@@ -122,6 +122,12 @@ func (s *Server) indexUploadAPI(c echo.Context) error {
 
 	ctx := c.Request().Context()
 
+	// Per-project lock: serialize concurrent uploads to the same project.
+	// If 2 MCP clients index the same project simultaneously, the second
+	// waits for the first to finish (prevents Qdrant upsert races).
+	s.indexMu.lockFor(req.Project).Lock()
+	defer s.indexMu.lockFor(req.Project).Unlock()
+
 	// Build collection key from active model config.
 	key := s.collectionKeyFor(req.Project)
 	if err := s.rag.CreateCollection(ctx, key); err != nil {

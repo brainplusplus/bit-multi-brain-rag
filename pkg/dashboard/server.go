@@ -26,6 +26,7 @@ import (
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/store"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"sync"
 )
 
 // Server is the dashboard HTTP server (built on Echo).
@@ -40,6 +41,30 @@ type Server struct {
 	indexer *indexer.Indexer
 	jobs    *jobs.Manager // background index job orchestrator (ADR-0005)
 	bm25    *rag.BM25Vectorizer // BM25 sparse vectorizer for hybrid search (ADR-0008)
+	indexMu *indexLocks // per-project mutex for concurrent upload protection
+}
+
+// indexLocks provides per-project mutexes so that concurrent uploads
+// (e.g. from 2 MCP clients indexing the same project) are serialized.
+type indexLocks struct {
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+}
+
+func newIndexLocks() *indexLocks {
+	return &indexLocks{locks: make(map[string]*sync.Mutex)}
+}
+
+// lockFor returns the mutex for the given project key, creating it if needed.
+func (x *indexLocks) lockFor(key string) *sync.Mutex {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	m, ok := x.locks[key]
+	if !ok {
+		m = &sync.Mutex{}
+		x.locks[key] = m
+	}
+	return m
 }
 
 // hybridEnabled returns true if hybrid search (dense + sparse + RRF) should
@@ -120,6 +145,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		indexer: idx,
 		jobs:    jobMgr,
 		bm25:    rag.NewBM25Vectorizer(), // unfitted; fitted on first index batch
+		indexMu: newIndexLocks(),
 	}
 
 	e := echo.New()
