@@ -154,6 +154,10 @@ func New(client *ragclient.Client, logger *slog.Logger) *Server {
 	s.Register(&ListProjectsTool{client: client})
 	s.Register(&CreateProjectTool{client: client, wm: wm})
 	s.Register(&ProjectStatusTool{client: client})
+	s.Register(&DeleteProjectTool{client: client})
+	s.Register(&StatsTool{client: client})
+	s.Register(&GetChunkTool{client: client})
+	s.Register(&SearchAcrossTool{client: client})
 	return s
 }
 
@@ -611,6 +615,9 @@ func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 		if len(data) > 1024*1024 { // skip files > 1MB
 			return nil
 		}
+		if len(strings.TrimSpace(string(data))) == 0 { // skip empty/whitespace-only files
+			return nil
+		}
 
 		stats.FilesScanned++
 
@@ -622,6 +629,9 @@ func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 		}
 
 		for _, c := range chunks {
+			if len(strings.TrimSpace(c.Content)) == 0 { // skip empty chunks
+				continue
+			}
 			stats.Chunks++
 			doc := ragclient.UploadDoc{
 				ID:      uuidV5(project, relPath, c.StartLine),
@@ -703,6 +713,9 @@ func deltaIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 		if len(data) > 1024*1024 {
 			continue
 		}
+		if len(strings.TrimSpace(string(data))) == 0 { // skip empty/whitespace-only files
+			continue
+		}
 
 		stats.FilesScanned++
 
@@ -713,6 +726,9 @@ func deltaIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 		}
 
 		for _, c := range chunks {
+			if len(strings.TrimSpace(c.Content)) == 0 { // skip empty chunks
+				continue
+			}
 			stats.Chunks++
 			batch = append(batch, ragclient.UploadDoc{
 				ID:      uuidV5(project, relPath, c.StartLine),
@@ -994,6 +1010,241 @@ func (t *ProjectStatusTool) Handle(ctx context.Context, args map[string]any) (To
 		if status.IndexedDone == 0 {
 			sb.WriteString("Index is empty. Call rag_index_project to build it.\n")
 		}
+	}
+	return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
+}
+
+// --- DeleteProjectTool ---
+
+// DeleteProjectTool removes a project and its Qdrant collection.
+type DeleteProjectTool struct {
+	client *ragclient.Client
+}
+
+func (t *DeleteProjectTool) Name() string { return "rag_delete_project" }
+
+func (t *DeleteProjectTool) Description() string {
+	return "Delete a project and its entire vector index from the dashboard. " +
+		"This is irreversible — all indexed chunks for the project are removed from Qdrant."
+}
+
+func (t *DeleteProjectTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"project_id": map[string]any{
+				"type":        "integer",
+				"description": "Numeric project ID to delete.",
+			},
+		},
+		"required": []string{"project_id"},
+	}
+}
+
+func (t *DeleteProjectTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
+	projectID, _ := args["project_id"].(float64)
+	if projectID == 0 {
+		return ToolResult{}, fmt.Errorf("project_id is required")
+	}
+	status, err := t.client.DeleteProject(ctx, int64(projectID))
+	if err != nil {
+		return ToolResult{}, err
+	}
+	return ToolResult{
+		Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+			"Project %d deleted (%s). All vector data removed from Qdrant.\n",
+			int64(projectID), status)}},
+	}, nil
+}
+
+// --- StatsTool ---
+
+// StatsTool returns collection statistics for a project.
+type StatsTool struct {
+	client *ragclient.Client
+}
+
+func (t *StatsTool) Name() string { return "rag_stats" }
+
+func (t *StatsTool) Description() string {
+	return "Get collection statistics for a project: total indexed points, vector dimensions, collection status."
+}
+
+func (t *StatsTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"project_id": map[string]any{
+				"type":        "integer",
+				"description": "Numeric project ID. Preferred.",
+			},
+			"project": map[string]any{
+				"type":        "string",
+				"description": "Project name (fallback).",
+			},
+		},
+	}
+}
+
+func (t *StatsTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
+	projectID, projectName := extractProjectArgs(args)
+	if projectID == 0 && projectName == "" {
+		return ToolResult{}, fmt.Errorf("project_id or project is required")
+	}
+	name, err := t.client.ResolveProjectIdentifier(ctx, projectID, projectName)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	stats, err := t.client.GetStats(ctx, name)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	return ToolResult{
+		Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+			"Project %q stats:\nPoints (chunks): %d\nVector dimensions: %d\nCollection status: %s\n",
+			name, stats.PointsCount, stats.VectorsSize, stats.Status)}},
+	}, nil
+}
+
+// --- GetChunkTool ---
+
+// GetChunkTool fetches a single chunk by its point ID for deeper inspection.
+type GetChunkTool struct {
+	client *ragclient.Client
+}
+
+func (t *GetChunkTool) Name() string { return "rag_get_chunk" }
+
+func (t *GetChunkTool) Description() string {
+	return "Fetch a single indexed chunk by its point ID. Use after rag_search_code to get the full content of a specific result."
+}
+
+func (t *GetChunkTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"project_id": map[string]any{
+				"type":        "integer",
+				"description": "Numeric project ID. Preferred.",
+			},
+			"project": map[string]any{
+				"type":        "string",
+				"description": "Project name (fallback).",
+			},
+			"point_id": map[string]any{
+				"type":        "string",
+				"description": "The chunk's point ID (UUID from search results).",
+			},
+		},
+		"required": []string{"point_id"},
+	}
+}
+
+func (t *GetChunkTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
+	projectID, projectName := extractProjectArgs(args)
+	if projectID == 0 && projectName == "" {
+		return ToolResult{}, fmt.Errorf("project_id or project is required")
+	}
+	pointID, _ := args["point_id"].(string)
+	if pointID == "" {
+		return ToolResult{}, fmt.Errorf("point_id is required")
+	}
+	name, err := t.client.ResolveProjectIdentifier(ctx, projectID, projectName)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	chunk, err := t.client.GetChunk(ctx, name, pointID)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	return ToolResult{
+		Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+			"Chunk %s:\nFile: %s\nSymbol: %s (%s)\nLines: %s-%s\n\n```%s\n%s\n```\n",
+			pointID,
+			chunk.Meta["source_file"],
+			chunk.Meta["name"],
+			chunk.Meta["symbol"],
+			chunk.Meta["start_line"],
+			chunk.Meta["end_line"],
+			chunk.Meta["language"],
+			chunk.Content)}},
+	}, nil
+}
+
+// --- SearchAcrossTool ---
+
+// SearchAcrossTool searches across ALL indexed projects at once.
+type SearchAcrossTool struct {
+	client *ragclient.Client
+}
+
+func (t *SearchAcrossTool) Name() string { return "rag_search_across" }
+
+func (t *SearchAcrossTool) Description() string {
+	return "Semantic search across ALL indexed projects. Returns results with project name + score. " +
+		"Useful when the agent doesn't know which project contains the relevant code."
+}
+
+func (t *SearchAcrossTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{
+				"type":        "string",
+				"description": "Natural-language query.",
+			},
+			"limit": map[string]any{
+				"type":        "integer",
+				"description": "Max results per project (default 3).",
+				"default":     3,
+			},
+		},
+		"required": []string{"query"},
+	}
+}
+
+func (t *SearchAcrossTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
+	query, _ := args["query"].(string)
+	if query == "" {
+		return ToolResult{}, fmt.Errorf("query is required")
+	}
+	limit := 3
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	projects, err := t.client.ListProjects(ctx)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	if len(projects) == 0 {
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: "No projects registered."}}}, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Searching across %d projects for %q:\n\n", len(projects), query))
+	totalResults := 0
+	for _, p := range projects {
+		results, err := t.client.Search(ctx, p.Name, query, limit)
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("[ERROR] %s: %v\n", p.Name, err))
+			continue
+		}
+		if len(results) == 0 {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("--- %s (project_id=%d) ---\n", p.Name, p.ID))
+		for i, r := range results {
+			totalResults++
+			sb.WriteString(fmt.Sprintf("%d. [%.3f] %s:%s (%s)\n",
+				i+1, r.Score, r.Meta["source_file"], r.Meta["start_line"], r.Meta["name"]))
+		}
+		sb.WriteString("\n")
+	}
+	if totalResults == 0 {
+		sb.WriteString("No results found in any project.\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("Total: %d results across %d projects.\n", totalResults, len(projects)))
 	}
 	return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
 }

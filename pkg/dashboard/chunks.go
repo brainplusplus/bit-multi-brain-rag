@@ -598,3 +598,42 @@ func scoreClass(score float64) string {
 func (s *Server) renderChunkError(title string, err error) string {
 	return fmt.Sprintf("<div class='index-stats'><h3 class='error'>%s</h3><p class='small muted'>%s</p></div>", template.HTMLEscapeString(title), template.HTMLEscapeString(err.Error()))
 }
+
+// apiProjectStats returns Qdrant collection stats for a project (JSON API).
+// GET /api/v1/projects/:name/stats
+func (s *Server) apiProjectStats(c echo.Context) error {
+	project := c.Param("name")
+	if project == "" {
+		return c.JSON(400, map[string]string{"error": "project name is required"})
+	}
+	key := s.collectionKeyFor(project)
+	info, err := s.rag.CollectionInfo(c.Request().Context(), key)
+	if err != nil {
+		return c.JSON(404, map[string]string{"error": fmt.Sprintf("collection: %v", err)})
+	}
+	return c.JSON(200, map[string]any{
+		"status":       info.Status,
+		"points_count": info.PointsCount,
+		"vectors_size": info.VectorsSize,
+	})
+}
+
+// apiGetChunk returns a single chunk by point ID (JSON API).
+// GET /api/v1/projects/:name/chunks/:pointID
+func (s *Server) apiGetChunk(c echo.Context) error {
+	project := c.Param("name")
+	pointID := c.Param("pointID")
+	if project == "" || pointID == "" {
+		return c.JSON(400, map[string]string{"error": "project name and pointID are required"})
+	}
+	key := s.collectionKeyFor(project)
+	pt, err := s.rag.GetPoint(c.Request().Context(), key, pointID)
+	if err != nil {
+		return c.JSON(404, map[string]string{"error": fmt.Sprintf("get point: %v", err)})
+	}
+	return c.JSON(200, map[string]any{
+		"id":      pointID,
+		"content": pt.Content,
+		"meta":    pt.Meta,
+	})
+}

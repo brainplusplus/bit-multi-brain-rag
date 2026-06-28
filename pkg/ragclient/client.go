@@ -530,3 +530,89 @@ func (c *Client) ResolveProjectIdentifier(ctx context.Context, projectID int64, 
 	}
 	return "", fmt.Errorf("either project_id or project must be provided")
 }
+
+// DeleteProject deletes a project by ID. Returns the status string.
+func (c *Client) DeleteProject(ctx context.Context, projectID int64) (string, error) {
+	url := fmt.Sprintf("%s/api/v1/projects/%d", c.baseURL, projectID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("ragclient: new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ragclient: do request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("ragclient: dashboard %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var out struct {
+		Status string `json:"status"`
+	}
+	json.Unmarshal(raw, &out)
+	return out.Status, nil
+}
+
+// CollectionStats holds point count + vector info for a project collection.
+type CollectionStats struct {
+	Status      string `json:"status"`
+	PointsCount int    `json:"points_count"`
+	VectorsSize int    `json:"vectors_size"`
+}
+
+// GetStats returns collection statistics for a project.
+func (c *Client) GetStats(ctx context.Context, project string) (*CollectionStats, error) {
+	url := fmt.Sprintf("%s/api/v1/projects/%s/stats", c.baseURL, project)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: do request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("ragclient: dashboard %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var out CollectionStats
+	json.Unmarshal(raw, &out)
+	return &out, nil
+}
+
+// ChunkInfo holds metadata about a single indexed chunk.
+type ChunkInfo struct {
+	ID         string            `json:"id"`
+	Content    string            `json:"content"`
+	Score      float64           `json:"score,omitempty"`
+	Meta       map[string]string `json:"meta"`
+}
+
+// GetChunk fetches a single chunk by its point ID from a project's collection.
+func (c *Client) GetChunk(ctx context.Context, project, pointID string) (*ChunkInfo, error) {
+	url := fmt.Sprintf("%s/api/v1/projects/%s/chunks/%s", c.baseURL, project, pointID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: do request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("ragclient: dashboard %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var out ChunkInfo
+	json.Unmarshal(raw, &out)
+	return &out, nil
+}

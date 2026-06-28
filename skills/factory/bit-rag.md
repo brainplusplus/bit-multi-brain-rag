@@ -37,7 +37,7 @@ unless explicitly stuck.
 
 ## Available MCP tools
 
-bit-rag exposes **6 tools** via MCP:
+bit-rag exposes **10 tools** via MCP:
 
 | Tool | Purpose |
 |------|---------|

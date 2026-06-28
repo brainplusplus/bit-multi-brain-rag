@@ -166,6 +166,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	api.GET("/projects", s.listProjects)
 	api.POST("/projects", s.createProject)
 	api.GET("/projects/:id", s.getProject)
+	api.GET("/projects/:name/stats", s.apiProjectStats)
+	api.GET("/projects/:name/chunks/:pointID", s.apiGetChunk)
 	api.DELETE("/projects/:id", s.deleteProject)
 	api.POST("/search", s.search)               // POST /api/v1/search
 	api.POST("/index", s.indexAPI)              // POST /api/v1/index — enqueue (returns 202)
