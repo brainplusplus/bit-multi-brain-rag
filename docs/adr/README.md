@@ -12,6 +12,7 @@ Project: **bit-multi-brain-rag**
 | [0004](0004-hybrid-architecture-best-of-both.md) | Hybrid Architecture (Best of cocoindex-code + enowx-rag) | Accepted | 2026-06-27 |
 | [0005](0005-background-indexing-jobs.md) | Background indexing jobs (async API + HTMX polling) | Accepted | 2026-06-27 |
 | [0006](0006-gpu-embedding-acceleration.md) | GPU Embedding Acceleration | Accepted | 2026-06-28 |
+| [0007](0007-gap-analysis-and-improvement-roadmap.md) | Gap Analysis & Improvement Roadmap | Accepted | 2026-06-28 |
 
 ## Conventions
 
