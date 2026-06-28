@@ -1313,10 +1313,11 @@ func (t *ProjectStatusTool) Handle(ctx context.Context, args map[string]any) (To
 		return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
 	}
 	sb.WriteString(fmt.Sprintf("Project %q (ID: %d, root: %s, domains: %s).\n", p.Name, p.ID, p.RootPath, p.Domains))
+	// Check index status via job manager first, then fall back to collection stats.
 	status, _ := t.client.GetIndexStatus(ctx, p.Name)
-	if status == nil {
-		sb.WriteString("Index status: unknown.\n")
-	} else {
+	hasIndexInfo := false
+	if status != nil && status.IndexedDone > 0 {
+		hasIndexInfo = true
 		sb.WriteString(fmt.Sprintf("Index status: %s, files=%d/%d, indexed=%d", status.Status, status.FilesDone, status.FilesTotal, status.IndexedDone))
 		if len(status.Errors) > 0 {
 			sb.WriteString(fmt.Sprintf(", errors=%d", len(status.Errors)))
@@ -1324,6 +1325,15 @@ func (t *ProjectStatusTool) Handle(ctx context.Context, args map[string]any) (To
 		sb.WriteString("\n")
 		if status.IndexedDone == 0 {
 			sb.WriteString("Index is empty. Call rag_index_project to build it.\n")
+		}
+	}
+	// Fallback: if job status is empty, check collection stats directly (embedded mode).
+	if !hasIndexInfo {
+		stats, statsErr := t.client.GetStats(ctx, p.Name)
+		if statsErr == nil && stats.PointsCount > 0 {
+			sb.WriteString(fmt.Sprintf("Index: %d chunks indexed (status: %s). Ready to search.\n", stats.PointsCount, stats.Status))
+		} else {
+			sb.WriteString("Index: empty. Call rag_index_project to build it.\n")
 		}
 	}
 	return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
