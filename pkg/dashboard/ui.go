@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"strconv"
+	"strings"
 
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/store"
@@ -21,6 +22,33 @@ import (
 func (s *Server) uiIndex(c echo.Context) error {
 	projects, _ := s.store.ListProjects(c.Request().Context())
 	return c.HTML(200, s.renderShell(projects))
+}
+
+// uiSettingsPage renders the full shell with settings as active content.
+func (s *Server) uiSettingsPage(c echo.Context) error {
+	projects, _ := s.store.ListProjects(c.Request().Context())
+	shell := s.renderShell(projects)
+	// The settings handler returns HTML partial — render it inline.
+	// We trick it by calling the same handler and using its response.
+	settingsHTML := s.renderSettingsHTML(c)
+	shell = strings.Replace(shell, "<main class='main' id='main'>", "<main class='main' id='main'>"+settingsHTML, 1)
+	return c.HTML(200, shell)
+}
+
+// renderSettingsHTML calls the settings rendering logic and returns HTML string.
+func (s *Server) renderSettingsHTML(c echo.Context) string {
+	// Delegate to a shared renderer that returns string (not echo response)
+	return s.buildSettingsHTML(c)
+}
+
+// uiModelsPage renders the full shell with models as active content.
+func (s *Server) uiModelsPage(c echo.Context) error {
+	projects, _ := s.store.ListProjects(c.Request().Context())
+	shell := s.renderShell(projects)
+	// Trigger models load via HTMX after page render
+	shell = strings.Replace(shell, "<main class='main' id='main'>",
+		"<main class='main' id='main' hx-get='/ui/models' hx-trigger='load' hx-target='this' hx-swap='innerHTML'>", 1)
+	return c.HTML(200, shell)
 }
 
 // uiProjectList renders only the sidebar project list (HTMX swap target).
@@ -132,8 +160,8 @@ func (s *Server) renderShell(projects []store.Project) string {
 
 	// Navigation
 	sb += "<nav class='sidebar-nav'>"
-	sb += "<a hx-get='/ui/models' hx-target='#main' hx-swap='innerHTML' class='nav-link'><span class='nav-icon'>◈</span> Models</a>"
-	sb += "<a hx-get='/ui/settings' hx-target='#main' hx-swap='innerHTML' class='nav-link'><span class='nav-icon'>⚙</span> Settings</a>"
+	sb += "<a href='/models' hx-get='/ui/models' hx-target='#main' hx-swap='innerHTML' hx-push-url='true' class='nav-link'><span class='nav-icon'>◈</span> Models</a>"
+	sb += "<a href='/settings' hx-get='/ui/settings' hx-target='#main' hx-swap='innerHTML' hx-push-url='true' class='nav-link'><span class='nav-icon'>⚙</span> Settings</a>"
 	sb += "</nav>"
 
 	// Projects
@@ -239,6 +267,8 @@ func (s *Server) renderProjectDetail(p store.Project, jobPartial string) string 
 	sb += "<button type='submit' class='btn'>Re-index</button>"
 	sb += "</form>"
 	sb += "</div></div>"
+	// Live progress bar (auto-polls while indexing, hidden when idle)
+	sb += fmt.Sprintf("<div id='index-progress' hx-get='/ui/index/progress?project=%s' hx-trigger='load, every 3s' hx-swap='innerHTML'></div>", template.HTMLEscapeString(pname))
 	if p.Description != "" {
 		sb += fmt.Sprintf("<p class='project-desc'>%s</p>", template.HTMLEscapeString(p.Description))
 	}
@@ -566,6 +596,11 @@ body{font-family:var(--sans);background:var(--bg-base);color:var(--text-primary)
 .machine-badge{font-family:var(--mono);font-size:10.5px;color:var(--accent-primary);background:var(--bg-elevated);padding:2px 7px;border-radius:3px;border:1px solid var(--accent-primary);margin-left:6px;white-space:nowrap;cursor:help}
 .project-header-actions{display:flex;gap:8px;flex-shrink:0}
 .project-desc{color:var(--text-secondary);font-size:12px;margin-top:6px}
+.index-progress{margin:12px 0;padding:12px 16px;background:var(--bg-surface);border-radius:8px;border:1px solid var(--border-subtle)}
+.progress-bar-wrap{height:6px;background:var(--bg-raised);border-radius:3px;overflow:hidden;margin-bottom:6px}
+.progress-bar-fill{height:100%;background:var(--accent-primary);border-radius:3px;transition:width 0.3s ease}
+.progress-label{font-size:12px;color:var(--text-secondary)}
+.progress-file{font-size:11px;color:var(--text-tertiary);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .index-info-card{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:8px;padding:16px 20px;margin:8px 0}
 .index-info-card .info-icon{font-size:24px;color:var(--accent-primary);margin:0 0 8px 0}
 .index-info-card p{margin:4px 0;line-height:1.5}

@@ -164,6 +164,32 @@ func (c *Client) Search(ctx context.Context, project, query string, limit int) (
 
 // Healthz pings the dashboard public health endpoint. Used by MCP boot
 // to fail fast if the configured DASHBOARD_URL is wrong.
+// ReportProgress sends indexing progress to the dashboard for UI display.
+// phase: "counting", "indexing", "done", "error"
+func (c *Client) ReportProgress(ctx context.Context, project, phase string, scanned, total int, msg string) {
+	body, _ := json.Marshal(map[string]any{
+		"project":      project,
+		"phase":        phase,
+		"scanned":      scanned,
+		"total":        total,
+		"message":      msg,
+		"machine_name": c.machineNm,
+	})
+	url := c.baseURL + "/api/v1/index/progress"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return // best-effort, don't fail indexing
+	}
+	resp.Body.Close()
+}
+
 func (c *Client) Healthz(ctx context.Context) error {
 	url := c.baseURL + "/healthz"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

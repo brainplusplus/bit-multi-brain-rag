@@ -607,6 +607,7 @@ func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 }
 
 // localIndexWithPatterns is the core walk+chunk+upload with optional pattern filter.
+// Reports progress to dashboard via client.ReportProgress for live UI updates.
 func localIndexWithPatterns(ctx context.Context, client *ragclient.Client, project, rootPath string, pf *indexer.PatternFilter) (*localIndexStats, error) {
 	start := time.Now()
 	ch := chunker.New()
@@ -617,12 +618,46 @@ func localIndexWithPatterns(ctx context.Context, client *ragclient.Client, proje
 		slog.Warn("gitignore load failed", "error", err)
 	}
 
+	// Phase 1: Walk to count total source files (fast — no file reads).
+	client.ReportProgress(ctx, project, "counting", 0, 0, "Scanning files...")
+	totalFiles := 0
+	filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if indexer.ShouldSkipDirPublic(info.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !indexer.IsSourceFilePublic(path) {
+			return nil
+		}
+		if gi != nil {
+			rel, _ := filepath.Rel(rootPath, path)
+			if gi.Match(rel) {
+				return nil
+			}
+		}
+		if pf != nil {
+			rel, _ := filepath.Rel(rootPath, path)
+			if !pf.Match(rel) {
+				return nil
+			}
+		}
+		totalFiles++
+		return nil
+	})
+	client.ReportProgress(ctx, project, "indexing", 0, totalFiles, fmt.Sprintf("Indexing %d files...", totalFiles))
+
+	// Phase 2: Walk again — read + chunk + upload with progress.
 	const batchSize = 64
 	var batch []ragclient.UploadDoc
 
 	walkErr := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // skip unreadable
+			return nil
 		}
 		if info.IsDir() {
 			if indexer.ShouldSkipDirPublic(info.Name()) {
@@ -695,6 +730,8 @@ func localIndexWithPatterns(ctx context.Context, client *ragclient.Client, proje
 				batch = batch[:0]
 			}
 		}
+		// Report progress after each file
+		client.ReportProgress(ctx, project, "indexing", stats.FilesScanned, totalFiles, relPath)
 		return nil
 	})
 	if walkErr != nil {
@@ -712,6 +749,8 @@ func localIndexWithPatterns(ctx context.Context, client *ragclient.Client, proje
 	}
 
 	stats.Duration = time.Since(start).Round(time.Millisecond).String()
+	client.ReportProgress(ctx, project, "done", stats.FilesScanned, totalFiles, fmt.Sprintf(
+		"Done: %d files, %d chunks, %d embedded (%s)", stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Duration))
 	return stats, nil
 }
 

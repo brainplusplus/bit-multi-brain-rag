@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 
@@ -106,6 +107,76 @@ type indexUploadReq struct {
 // embeds them, and stores in Qdrant. This is the "remote index" path:
 // MCP reads + chunks locally, sends chunks here for embed + store.
 // No filesystem access needed on the dashboard side (no mounting).
+// indexProgressAPI receives progress updates from the MCP client during indexing.
+// POST /api/v1/index/progress
+func (s *Server) indexProgressAPI(c echo.Context) error {
+	var req struct {
+		Project string `json:"project"`
+		Phase   string `json:"phase"`
+		Scanned int    `json:"scanned"`
+		Total   int    `json:"total"`
+		Message string `json:"message"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(400, map[string]string{"error": "invalid request body"})
+	}
+	if req.Project == "" {
+		return c.JSON(400, map[string]string{"error": "project is required"})
+	}
+	s.progress.set(req.Project, indexProgress{
+		Phase:     req.Phase,
+		Scanned:   req.Scanned,
+		Total:     req.Total,
+		Message:   req.Message,
+		UpdatedAt: time.Now().Unix(),
+	})
+	return c.JSON(200, map[string]string{"status": "ok"})
+}
+
+// indexProgressGetAPI returns the current indexing progress for a project.
+// GET /api/v1/index/progress?project=X — polled by UI during indexing.
+func (s *Server) indexProgressGetAPI(c echo.Context) error {
+	project := c.QueryParam("project")
+	if project == "" {
+		return c.JSON(400, map[string]string{"error": "project is required"})
+	}
+	p := s.progress.get(project)
+	if p == nil {
+		return c.JSON(200, map[string]any{"phase": "idle"})
+	}
+	return c.JSON(200, p)
+}
+
+// uiIndexProgress renders the live progress bar partial (polled by HTMX).
+func (s *Server) uiIndexProgress(c echo.Context) error {
+	project := c.QueryParam("project")
+	if project == "" {
+		return c.HTML(200, "")
+	}
+	p := s.progress.get(project)
+	if p == nil || p.Phase == "done" || p.Phase == "idle" {
+		return c.HTML(200, "")
+	}
+
+	pct := 0
+	if p.Total > 0 {
+		pct = (p.Scanned * 100) / p.Total
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<div class='index-progress' hx-get='/ui/index/progress?project=")
+	sb.WriteString(template.HTMLEscapeString(project))
+	sb.WriteString("' hx-trigger='every 2s' hx-target='this' hx-swap='outerHTML' hx-target='#index-progress'>")
+	sb.WriteString(fmt.Sprintf("<div class='progress-bar-wrap'><div class='progress-bar-fill' style='width:%d%%'></div></div>", pct))
+	sb.WriteString(fmt.Sprintf("<div class='progress-label'>%s: %d/%d files (%d%%)</div>",
+		template.HTMLEscapeString(p.Phase), p.Scanned, p.Total, pct))
+	if p.Message != "" {
+		sb.WriteString(fmt.Sprintf("<div class='progress-file muted small'>%s</div>", template.HTMLEscapeString(p.Message)))
+	}
+	sb.WriteString("</div>")
+	return c.HTML(200, sb.String())
+}
+
 func (s *Server) indexUploadAPI(c echo.Context) error {
 	var req indexUploadReq
 	if err := c.Bind(&req); err != nil {

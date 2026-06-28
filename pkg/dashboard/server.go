@@ -43,6 +43,40 @@ type Server struct {
 	jobs    *jobs.Manager // background index job orchestrator (ADR-0005)
 	bm25    *rag.BM25Vectorizer // BM25 sparse vectorizer for hybrid search (ADR-0008)
 	indexMu *indexLocks // per-project mutex for concurrent upload protection
+	progress *indexProgressTracker // in-memory indexing progress (for live UI)
+}
+
+// indexProgressTracker tracks live indexing progress per project (in-memory).
+type indexProgressTracker struct {
+	mu   sync.RWMutex
+	data map[string]*indexProgress // key = project name
+}
+
+type indexProgress struct {
+	Phase     string `json:"phase"`      // "counting", "indexing", "done", "error"
+	Scanned   int    `json:"scanned"`
+	Total     int    `json:"total"`
+	Message   string `json:"message"`
+	UpdatedAt int64  `json:"updated_at"` // unix timestamp
+}
+
+func newIndexProgressTracker() *indexProgressTracker {
+	return &indexProgressTracker{data: make(map[string]*indexProgress)}
+}
+
+func (t *indexProgressTracker) set(project string, p indexProgress) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.data[project] = &p
+}
+
+func (t *indexProgressTracker) get(project string) *indexProgress {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if p, ok := t.data[project]; ok {
+		return p
+	}
+	return nil
 }
 
 // indexLocks provides per-project mutexes so that concurrent uploads
@@ -178,6 +212,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		jobs:    jobMgr,
 		bm25:    rag.NewBM25Vectorizer(), // unfitted; fitted on first index batch
 		indexMu: newIndexLocks(),
+		progress: newIndexProgressTracker(),
 	}
 
 	e := echo.New()
@@ -189,6 +224,12 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	e.Use(middleware.RemoveTrailingSlashWithConfig(middleware.TrailingSlashConfig{
 		RedirectCode: 301,
 	}))
+
+	// --- Full-page routes (render entire shell with active panel) ---
+	e.GET("/", s.uiIndex)
+	e.GET("/projects", s.uiIndex)
+	e.GET("/settings", s.uiSettingsPage)
+	e.GET("/models", s.uiModelsPage)
 
 	// --- Public routes ---
 	e.GET("/healthz", s.healthz)
@@ -203,7 +244,9 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	api.DELETE("/projects/:id", s.deleteProject)
 	api.POST("/search", s.search)               // POST /api/v1/search
 	api.POST("/index", s.indexAPI)              // POST /api/v1/index — enqueue (returns 202)
-	api.POST("/index/upload", s.indexUploadAPI) // POST /api/v1/index/upload — accept pre-chunked docs (MCP upload)
+	api.POST("/index/upload", s.indexUploadAPI)   // POST /api/v1/index/upload — accept pre-chunked docs (MCP upload)
+	api.POST("/index/progress", s.indexProgressAPI) // POST /api/v1/index/progress — MCP reports progress
+	api.GET("/index/progress", s.indexProgressGetAPI) // GET /api/v1/index/progress?project=X — UI polls this
 	api.GET("/index/status", s.indexStatusAPI)  // GET  /api/v1/index/status?project=X
 	api.POST("/index/cancel", s.indexCancelAPI) // POST /api/v1/index/cancel
 	api.GET("/models", s.apiListModels)              // GET  /api/v1/models
@@ -241,6 +284,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	e.POST("/ui/projects", s.uiCreateProject)                  // HTMX partial: create + refresh list
 	e.GET("/ui/search", s.uiSearch)                            // HTMX partial: search results
 	e.POST("/ui/index", s.uiRunIndex)                          // HTMX partial: enqueue indexing + live status
+	e.GET("/ui/index/progress", s.uiIndexProgress)             // HTMX partial: live progress bar (polled)
 	e.GET("/ui/index/status", s.uiJobStatus)                   // HTMX partial: poll job state (every 2s)
 	e.POST("/ui/index/cancel", s.uiCancelIndex)                // HTMX partial: cancel running job
 

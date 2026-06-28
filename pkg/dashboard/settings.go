@@ -9,8 +9,14 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// uiSettingsPanel renders the Settings page (currently: GPU runtime card).
+// uiSettingsPanel renders the Settings page as HTMX partial.
 func (s *Server) uiSettingsPanel(c echo.Context) error {
+	return c.HTML(200, s.buildSettingsHTML(c))
+}
+
+// buildSettingsHTML returns the settings panel HTML string.
+// Shared between HTMX partial (uiSettingsPanel) and full-page route (uiSettingsPage).
+func (s *Server) buildSettingsHTML(c echo.Context) string {
 	// Check if running in embedded (zvec) mode
 	embeddedMode := s.cfg.ZvecPath != ""
 
@@ -181,7 +187,7 @@ func (s *Server) uiSettingsPanel(c echo.Context) error {
 
 	sb.WriteString("</section>")
 	sb.WriteString("</div>")
-	return c.HTML(200, sb.String())
+	return sb.String()
 }
 
 // uiGPUSwitch executes the switch synchronously and re-renders the Settings panel
