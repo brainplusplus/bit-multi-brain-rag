@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 )
@@ -100,7 +101,7 @@ func (s *Server) buildSettingsHTML(c echo.Context) string {
 	sb.WriteString("</div></div>")
 
 	if embeddedMode {
-		// Embedded mode: no Docker container management needed
+		// Embedded mode: show local embedder controls
 		sb.WriteString("<div class='settings-row'>")
 		sb.WriteString("<div class='settings-row-label'>Storage</div>")
 		sb.WriteString("<div class='settings-row-value'><span class='badge accent'>zvec embedded</span> <span class='muted small'>in-process, no Docker</span></div>")
@@ -111,7 +112,26 @@ func (s *Server) buildSettingsHTML(c echo.Context) string {
 		sb.WriteString("<div class='settings-row-value'><span class='badge accent'>local binary</span> <span class='muted small'>" + template.HTMLEscapeString(s.cfg.EmbeddingEndpoint) + "</span></div>")
 		sb.WriteString("</div>")
 
-		sb.WriteString("<div class='muted small' style='margin-top:16px;padding-top:16px;border-top:1px solid var(--border)'>Running in zero-setup mode. No Docker containers managed by dashboard.</div>")
+		// GPU switch for local embedder (only if embedder binary is managed by dashboard)
+		if s.embedderMgr != nil {
+			sb.WriteString("<div class='settings-row' style='border-top:1px solid var(--border);padding-top:16px;margin-top:16px'>")
+			sb.WriteString("<div class='settings-row-label'>Switch runtime</div>")
+			sb.WriteString("<div class='settings-row-value'>")
+			if st.CurrentMode == "gpu" {
+				sb.WriteString("<button class='btn' hx-post='/api/v1/embedder/switch' hx-vals='{\"mode\":\"cpu\"}' hx-target='#main' hx-swap='outerHTML' hx-confirm='Restart embedder in CPU mode?'>Switch to CPU</button>")
+			} else {
+				canSwitch := st.Detected
+				btnAttrs := ""
+				if !canSwitch {
+					btnAttrs = " disabled title='GPU not detected'"
+				}
+				sb.WriteString(fmt.Sprintf("<button class='btn'%s hx-post='/api/v1/embedder/switch' hx-vals='{\"mode\":\"gpu\"}' hx-target='#main' hx-swap='outerHTML' hx-confirm='Restart embedder in GPU mode?'>Switch to GPU</button>", btnAttrs))
+			}
+			sb.WriteString("<div class='muted small' style='margin-top:8px'>Restarts the local llama-server with/without GPU acceleration.</div>")
+			sb.WriteString("</div></div>")
+		} else {
+			sb.WriteString("<div class='muted small' style='margin-top:16px;padding-top:16px;border-top:1px solid var(--border)'>Set <code>EMBEDDER_BINARY</code> to enable GPU/CPU switching for the local embedder.</div>")
+		}
 	} else {
 		// Docker mode: show container toolkit + switch buttons
 		// Container toolkit
@@ -273,4 +293,45 @@ func (s *Server) uiHybridToggle(c echo.Context) error {
 	}
 	// Re-render the full settings panel.
 	return s.uiSettingsPanel(c)
+}
+
+// apiEmbedderSwitch restarts the local embedder binary with GPU/CPU toggle.
+// POST /api/v1/embedder/switch {"mode":"gpu"|"cpu"}
+// Only works when EMBEDDER_BINARY is configured (embedded mode).
+func (s *Server) apiEmbedderSwitch(c echo.Context) error {
+	if s.embedderMgr == nil {
+		return c.JSON(400, map[string]string{"error": "embedder binary manager not configured. Set EMBEDDER_BINARY to enable local embedder switching."})
+	}
+
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(400, map[string]string{"error": "invalid request"})
+	}
+	if req.Mode != "gpu" && req.Mode != "cpu" {
+		return c.JSON(400, map[string]string{"error": "mode must be 'gpu' or 'cpu'"})
+	}
+
+	// Stop existing embedder, flip GPU flag, restart.
+	s.embedderMgr.Stop()
+	s.embedderMgr.SetGPU(req.Mode == "gpu")
+
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 120*time.Second)
+	defer cancel()
+
+	endpoint, err := s.embedderMgr.Start(ctx)
+	if err != nil {
+		return c.JSON(500, map[string]string{"error": fmt.Sprintf("restart failed: %v", err)})
+	}
+
+	// Persist mode
+	s.store.SetSetting(c.Request().Context(), "embedder_mode", req.Mode)
+
+	return c.JSON(200, map[string]any{
+		"ok":       true,
+		"mode":     req.Mode,
+		"endpoint": endpoint,
+		"message":  fmt.Sprintf("Embedder restarted in %s mode", req.Mode),
+	})
 }

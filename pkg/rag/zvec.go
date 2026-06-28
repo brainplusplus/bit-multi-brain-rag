@@ -273,8 +273,8 @@ func (z *ZvecClient) GetPoint(ctx context.Context, key CollectionKey, pointID st
 	if err != nil {
 		return Point{}, err
 	}
-	pkStr := fmt.Sprintf("%d", hashDocID(pointID))
-	docs, err := collection.Fetch([]string{pkStr}, nil)
+	// zvec PKs are already strings (from search results). Use directly.
+	docs, err := collection.Fetch([]string{pointID}, nil)
 	if err != nil {
 		return Point{}, err
 	}

@@ -44,6 +44,7 @@ type Server struct {
 	bm25    *rag.BM25Vectorizer // BM25 sparse vectorizer for hybrid search (ADR-0008)
 	indexMu *indexLocks // per-project mutex for concurrent upload protection
 	progress *indexProgressTracker // in-memory indexing progress (for live UI)
+	embedderMgr *embedder.Manager // local embedder binary manager (embedded mode)
 }
 
 // indexProgressTracker tracks live indexing progress per project (in-memory).
@@ -154,15 +155,16 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// Embedder: if EMBEDDER_BINARY is set, start local llama-server child process.
 	// Otherwise use the configured HTTP endpoint (Docker or remote).
 	embEndpoint := cfg.EmbeddingEndpoint
+	var embMgr *embedder.Manager
 	if cfg.EmbedderBinary != "" && cfg.EmbedderModel != "" {
-		em := embedder.New(embedder.Config{
+		embMgr = embedder.New(embedder.Config{
 			BinaryPath: cfg.EmbedderBinary,
 			ModelPath:  cfg.EmbedderModel,
 			Port:       8080,
 			APIKey:     cfg.EmbeddingAPIKey,
 			GPU:        cfg.EmbedderGPU,
 		}, logger)
-		endpoint, err := em.Start(context.Background())
+		endpoint, err := embMgr.Start(context.Background())
 		if err != nil {
 			logger.Error("embedder binary failed to start", "error", err)
 		} else {
@@ -213,6 +215,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		bm25:    rag.NewBM25Vectorizer(), // unfitted; fitted on first index batch
 		indexMu: newIndexLocks(),
 		progress: newIndexProgressTracker(),
+		embedderMgr: embMgr,
 	}
 
 	e := echo.New()
@@ -260,7 +263,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	api.GET("/providers", s.apiProviders)            // GET  /api/v1/providers — registry
 	api.GET("/providers/:id/models", s.apiProviderModels) // GET  /api/v1/providers/:id/models?refresh=1
 	api.GET("/gpu/status", s.apiGPUStatus)            // GET  /api/v1/gpu/status — detection
-	api.POST("/gpu/switch", s.apiGPUSwitch)           // POST /api/v1/gpu/switch — switch to gpu|cpu
+	api.POST("/gpu/switch", s.apiGPUSwitch)           // POST /api/v1/gpu/switch — switch to gpu|cpu (Docker mode)
+	api.POST("/embedder/switch", s.apiEmbedderSwitch)  // POST /api/v1/embedder/switch — restart embedder with/without GPU (embedded mode)
 
 	// --- Web UI ---
 	e.GET("/", s.uiIndex)

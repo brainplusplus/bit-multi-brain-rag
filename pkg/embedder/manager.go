@@ -106,6 +106,11 @@ func (m *Manager) Stop() {
 	}
 }
 
+// SetGPU toggles GPU mode for next Start() call.
+func (m *Manager) SetGPU(enable bool) {
+	m.cfg.GPU = enable
+}
+
 // isHealthy checks if the embedder HTTP endpoint responds.
 func (m *Manager) isHealthy(endpoint string) bool {
 	resp, err := http.Get(endpoint + "/health")
