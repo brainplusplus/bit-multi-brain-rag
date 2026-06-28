@@ -564,7 +564,7 @@ func shouldSkipDir(name string) bool {
 var sourceExts = map[string]bool{
 	// AST-aware (tree-sitter):
 	".go": true, ".py": true, ".js": true, ".jsx": true, ".mjs": true, ".cjs": true,
-	".ts": true, ".rs": true, ".java": true, ".cs": true,
+	".ts": true, ".tsx": true, ".rs": true, ".java": true, ".cs": true,
 	".cpp": true, ".cc": true, ".cxx": true, ".hpp": true, ".h": true, ".hh": true, ".hxx": true,
 	// AST-aware (Jalur B additions):
 	".rb": true, ".php": true, ".sh": true, ".bash": true, ".sql": true,
@@ -600,6 +600,18 @@ func isSourceFile(path string) bool {
 	return false
 }
 
+// IsSourceFilePublic is the exported version of isSourceFile for use by
+// the watcher package.
+func IsSourceFilePublic(path string) bool {
+	return isSourceFile(path)
+}
+
+// ShouldSkipDirPublic is the exported version of shouldSkipDir for use by
+// the watcher package.
+func ShouldSkipDirPublic(name string) bool {
+	return shouldSkipDir(name)
+}
+
 // ensureBM25 lazily initializes + fits the BM25 vectorizer on the first batch.
 // Subsequent calls are no-ops (already fitted). IDF stats from the first batch
 // are a good approximation for relative term weighting within the index.
@@ -633,7 +645,7 @@ func (ix *Indexer) deletePointsByFiles(ctx context.Context, key rag.CollectionKe
 	}
 	var toDelete []string
 	for _, pt := range points {
-		if removed[pt.Meta["source_file"]] {
+		if removed[pt.SourceFile] {
 			toDelete = append(toDelete, pt.ID)
 		}
 	}

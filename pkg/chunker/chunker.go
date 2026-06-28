@@ -92,7 +92,7 @@ func langByExt(ext string) (*languageInfo, bool) {
 			"function_declaration", "class_declaration", "method_definition",
 			"lexical_declaration", "variable_declaration",
 		}}, true
-	case ".ts":
+	case ".ts", ".tsx":
 		return &languageInfo{lang: tstype.GetLanguage(), name: "typescript", defTypes: []string{
 			"function_declaration", "class_declaration", "method_definition",
 			"interface_declaration", "type_alias_declaration",

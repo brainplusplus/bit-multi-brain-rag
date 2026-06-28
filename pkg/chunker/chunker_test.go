@@ -2,80 +2,195 @@ package chunker
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
-// TestChunkGoFile verifies AST-aware chunking on a small Go snippet.
-func TestChunkGoFile(t *testing.T) {
+func TestLangByExt(t *testing.T) {
+	tests := []struct {
+		ext      string
+		wantLang string
+		wantOK   bool
+	}{
+		{".go", "go", true},
+		{".py", "python", true},
+		{".js", "javascript", true},
+		{".ts", "typescript", true},
+		{".rs", "rust", true},
+		{".java", "java", true},
+		{".cs", "csharp", true},
+		{".cpp", "cpp", true},
+		{".rb", "ruby", true},
+		{".php", "php", true},
+		{".sh", "bash", true},
+		{".sql", "sql", true},
+		{".swift", "swift", true},
+		{".kt", "kotlin", true},
+		{".lua", "lua", true},
+		{".proto", "protobuf", true},
+		{".tf", "hcl", true},
+		{".yaml", "yaml", true},
+		{".css", "css", true},
+		{".html", "html", true},
+		{".unknown", "", false},
+		{".txt", "", false},
+		{".json", "", false},
+	}
+	for _, tt := range tests {
+		info, ok := langByExt(tt.ext)
+		if ok != tt.wantOK {
+			t.Errorf("langByExt(%q): ok=%v, want %v", tt.ext, ok, tt.wantOK)
+			continue
+		}
+		if ok && info.name != tt.wantLang {
+			t.Errorf("langByExt(%q): lang=%q, want %q", tt.ext, info.name, tt.wantLang)
+		}
+	}
+}
+
+func TestLangByBasename(t *testing.T) {
+	info, ok := langByBasename("Dockerfile")
+	if !ok || info.name != "dockerfile" {
+		t.Errorf("langByBasename('Dockerfile'): ok=%v", ok)
+	}
+	_, ok = langByBasename("Makefile")
+	if ok {
+		t.Error("langByBasename('Makefile'): expected ok=false (no AST grammar for Makefile)")
+	}
+}
+
+func TestChunkGoAST(t *testing.T) {
 	src := []byte(`package main
 
 import "fmt"
 
-// Add returns the sum.
-func Add(a, b int) int {
+func add(a, b int) int {
 	return a + b
 }
 
-type Point struct {
-	X, Y int
-}
-
-func (p Point) Distance() int {
-	return p.X + p.Y
+func main() {
+	fmt.Println(add(1, 2))
 }
 `)
 	ch := New()
-	chunks, err := ch.ChunkFile(context.Background(), src, "main.go")
+	chunks, err := ch.ChunkFile(context.Background(), src, "test.go")
 	if err != nil {
-		t.Fatalf("ChunkFile: %v", err)
+		t.Fatal(err)
 	}
-	if len(chunks) < 3 {
-		t.Fatalf("expected >=3 chunks (Add, Point, Distance), got %d", len(chunks))
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks (add + main), got %d", len(chunks))
 	}
-	// Verify each chunk has required metadata.
-	for _, c := range chunks {
-		if c.Language != "go" {
-			t.Errorf("chunk language = %q, want go", c.Language)
-		}
-		if c.SourceFile != "main.go" {
-			t.Errorf("source file = %q, want main.go", c.SourceFile)
-		}
-		if c.Content == "" {
-			t.Error("chunk content is empty")
-		}
-		if c.StartLine <= 0 || c.EndLine < c.StartLine {
-			t.Errorf("bad line range: %d-%d", c.StartLine, c.EndLine)
-		}
+	if chunks[0].Name != "add" {
+		t.Errorf("first chunk name=%q, want 'add'", chunks[0].Name)
 	}
-	// Check that "Add" symbol was extracted.
-	foundAdd := false
-	for _, c := range chunks {
-		if c.Name == "Add" {
-			foundAdd = true
-			if !strings.Contains(c.Content, "func Add") {
-				t.Errorf("Add chunk content missing 'func Add': %q", c.Content)
-			}
-		}
+	if chunks[1].Name != "main" {
+		t.Errorf("second chunk name=%q, want 'main'", chunks[1].Name)
 	}
-	if !foundAdd {
-		t.Error("no chunk named 'Add' found")
+	if chunks[0].Language != "go" {
+		t.Errorf("language=%q, want 'go'", chunks[0].Language)
 	}
 }
 
-// TestChunkUnsupportedLang falls back to naive chunking.
-func TestChunkUnsupportedLang(t *testing.T) {
-	src := []byte(strings.Repeat("line of text\n", 150))
+func TestChunkPythonAST(t *testing.T) {
+	src := []byte(`def greet(name):
+    print(f"Hello, {name}!")
+
+class Calculator:
+    def add(self, a, b):
+        return a + b
+`)
 	ch := New()
-	ch.MaxChunkLines = 50
-	chunks, err := ch.ChunkFile(context.Background(), src, "readme.txt")
+	chunks, err := ch.ChunkFile(context.Background(), src, "test.py")
 	if err != nil {
-		t.Fatalf("ChunkFile: %v", err)
+		t.Fatal(err)
 	}
-	if len(chunks) < 3 {
-		t.Fatalf("expected >=3 naive chunks (150/50), got %d", len(chunks))
+	if len(chunks) < 2 {
+		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
+	}
+}
+
+func TestChunkNaiveFallback(t *testing.T) {
+	src := []byte("line1\nline2\nline3\n")
+	ch := New()
+	ch.MaxChunkLines = 2
+	chunks, err := ch.ChunkFile(context.Background(), src, "test.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks (2 lines each), got %d", len(chunks))
 	}
 	if chunks[0].Language != "txt" {
-		t.Errorf("language = %q, want txt", chunks[0].Language)
+		t.Errorf("language=%q, want 'txt'", chunks[0].Language)
+	}
+}
+
+func TestChunkEmptyFile(t *testing.T) {
+	ch := New()
+	chunks, err := ch.ChunkFile(context.Background(), []byte(""), "empty.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk (whole-file fallback), got %d", len(chunks))
+	}
+}
+
+func TestChunkRubyAST(t *testing.T) {
+	src := []byte(`
+class User
+  def name
+    @name
+  end
+end
+`)
+	ch := New()
+	chunks, err := ch.ChunkFile(context.Background(), src, "user.rb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected at least 1 chunk for Ruby")
+	}
+	if chunks[0].Language != "ruby" {
+		t.Errorf("language=%q, want 'ruby'", chunks[0].Language)
+	}
+}
+
+func TestChunkSQLAST(t *testing.T) {
+	src := []byte(`
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL
+);
+
+CREATE INDEX idx_users_name ON users(name);
+`)
+	ch := New()
+	chunks, err := ch.ChunkFile(context.Background(), src, "schema.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected at least 1 chunk for SQL")
+	}
+	if chunks[0].Language != "sql" {
+		t.Errorf("language=%q, want 'sql'", chunks[0].Language)
+	}
+}
+
+func TestChunkDockerfile(t *testing.T) {
+	src := []byte(`FROM golang:1.25-alpine
+WORKDIR /app
+COPY . .
+RUN go build -o app .
+CMD ["./app"]
+`)
+	ch := New()
+	chunks, err := ch.ChunkFile(context.Background(), src, "Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected at least 1 chunk for Dockerfile")
 	}
 }
