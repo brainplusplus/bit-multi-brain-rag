@@ -45,6 +45,14 @@ When opening any project folder, **before accepting search queries**:
 **Do NOT ask the user to manually create or look up IDs.** `rag_create_project`
 is idempotent — calling it on every session start is safe.
 
+## Auto-reindex (file watcher)
+
+After `rag_create_project` or `rag_index_project`, the MCP server watches
+`root_path` for file changes. Changed files are auto-reindexed (delta — only
+the changed files) within 5 seconds. **You do NOT need to manually reindex
+after code changes.** Only call `rag_index_project` if search results seem
+stale or after a large merge.
+
 ## Decision tree (after onboard)
 
 ```
@@ -53,7 +61,7 @@ User asks about code?
 ├── Knows exact function/class name?        → Grep (skip RAG)
 ├── Describes behavior or pattern?          → rag_search_code ★
 ├── Needs context before writing code?      → rag_retrieve_context ★
-├── Finished coding, index changed?         → rag_index_project ★
+├── Finished coding?                         → Auto-reindexed by watcher (do nothing)
 └── Doesn't know project_id?                → rag_create_project(root_path) ★
 ```
 

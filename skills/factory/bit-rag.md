@@ -99,8 +99,13 @@ machine?"
 
 ### After coding (refresh index)
 
-1. Call `rag_index_project` with `project_id`.
-2. Files are scanned locally + uploaded — results available immediately.
+**Usually nothing needed.** After `rag_create_project` or `rag_index_project`,
+the MCP server starts a **file watcher** on `root_path`. Changed files are
+auto-reindexed (delta — only changed files, not full walk) within 5 seconds.
+
+Only call `rag_index_project` for a full reindex if:
+- Search results seem stale or missing recent changes
+- After pulling a large merge or branch switch
 
 ## Query writing rules
 

@@ -16,6 +16,17 @@ When you start working on this project, **before accepting search queries**:
 **Do not ask the user to manually create or look up IDs.** `rag_create_project`
 is idempotent by root_path.
 
+## Auto-reindex (file watcher)
+
+After `rag_create_project` or `rag_index_project`, the MCP server starts a
+**file watcher** on `root_path`. When files change (create/edit/delete), it
+auto-reindexes only the changed files within 5 seconds.
+
+**You do NOT need to call `rag_index_project` after every code change.** The
+watcher handles it. Only call `rag_index_project` if:
+- Search results seem stale or missing recent changes.
+- You want a full reindex (e.g. after pulling a large merge).
+
 ## Project identity: use `project_id`
 
 **Always use `project_id` (numeric) in tool calls.** It is guaranteed unique.
@@ -30,8 +41,8 @@ The `project` (name) parameter is a fallback only.
 ## After you finish coding
 
 1. Summarize what you changed and why.
-2. Call `rag_index_project` with `project_id` to refresh the index.
-3. Indexing scans files locally + uploads — results available immediately.
+2. The file watcher auto-reindexes changed files — no manual `rag_index_project` needed.
+3. If search results seem stale, call `rag_index_project` for a full refresh.
 
 ## When to search (retrieve)
 
