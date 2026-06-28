@@ -362,6 +362,25 @@ func (t *CodeRAGTool) Handle(ctx context.Context, args map[string]any) (ToolResu
 	if err != nil {
 		return ToolResult{}, err
 	}
+	// If no results, check if project is indexed. If not, guide the agent to index.
+	if len(results) == 0 {
+		stats, statsErr := t.client.GetStats(ctx, name)
+		if statsErr == nil && stats.PointsCount == 0 {
+			pid := projectID
+			if pid == 0 {
+				if p, pErr := t.client.GetProject(ctx, name); pErr == nil {
+					pid = p.ID
+				}
+			}
+			return ToolResult{
+				Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+					"No results — project %q is not indexed yet (0 chunks in collection).\n"+
+						"Call rag_index_project with project_id=%d to index, then search again.\n"+
+						"First index scans all source files (~20s for ~100 files). Subsequent indexes use manifest delta (only changed files).",
+					name, pid)}},
+			}, nil
+		}
+	}
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: formatResults(query, name, results)}},
 	}, nil
@@ -465,6 +484,23 @@ func (t *RetrieveContextTool) Handle(ctx context.Context, args map[string]any) (
 	results, err := t.client.Search(ctx, name, query, limit)
 	if err != nil {
 		return ToolResult{}, err
+	}
+	if len(results) == 0 {
+		stats, statsErr := t.client.GetStats(ctx, name)
+		if statsErr == nil && stats.PointsCount == 0 {
+			pid := projectID
+			if pid == 0 {
+				if p, pErr := t.client.GetProject(ctx, name); pErr == nil {
+					pid = p.ID
+				}
+			}
+			return ToolResult{
+				Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+					"No context found — project %q is not indexed (0 chunks).\n"+
+						"Call rag_index_project with project_id=%d to index first.",
+					name, pid)}},
+			}, nil
+		}
 	}
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: formatContext(query, name, results)}},
