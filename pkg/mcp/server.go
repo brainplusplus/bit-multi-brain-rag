@@ -362,28 +362,75 @@ func (t *CodeRAGTool) Handle(ctx context.Context, args map[string]any) (ToolResu
 	if err != nil {
 		return ToolResult{}, err
 	}
-	// If no results, check if project is indexed. If not, guide the agent to index.
+	// If no results, diagnose why and give actionable guidance.
 	if len(results) == 0 {
-		stats, statsErr := t.client.GetStats(ctx, name)
-		if statsErr == nil && stats.PointsCount == 0 {
-			pid := projectID
-			if pid == 0 {
-				if p, pErr := t.client.GetProject(ctx, name); pErr == nil {
-					pid = p.ID
-				}
-			}
-			return ToolResult{
-				Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
-					"No results — project %q is not indexed yet (0 chunks in collection).\n"+
-						"Call rag_index_project with project_id=%d to index, then search again.\n"+
-						"First index scans all source files (~20s for ~100 files). Subsequent indexes use manifest delta (only changed files).",
-					name, pid)}},
-			}, nil
-		}
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: emptySearchMessage(ctx, t.client, name, projectID)}}}, nil
 	}
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: formatResults(query, name, results)}},
 	}, nil
+}
+
+// emptySearchMessage diagnoses why search returned 0 results and returns
+// an actionable message for the agent.
+func emptySearchMessage(ctx context.Context, client *ragclient.Client, name string, projectID int64) string {
+	stats, err := client.GetStats(ctx, name)
+	if err == nil && stats.PointsCount > 0 {
+		// Indexed but no match — query didn't hit anything.
+		return fmt.Sprintf("No matches for query in project %q (%d chunks indexed).\n"+
+			"Try different keywords or a more specific phrase.", name, stats.PointsCount)
+	}
+
+	// 0 points — either not indexed, or project folder has no source files.
+	proj, pErr := client.GetProject(ctx, name)
+	if pErr != nil {
+		return fmt.Sprintf("No results from project %q and could not fetch project info: %v", name, pErr)
+	}
+
+	pid := projectID
+	if pid == 0 {
+		pid = proj.ID
+	}
+
+	// Walk root_path to check if there are source files on disk.
+	sourceFileCount := 0
+	if proj.RootPath != "" {
+		sourceFileCount = countSourceFiles(proj.RootPath)
+	}
+
+	if sourceFileCount == 0 {
+		return fmt.Sprintf(
+			"No results — project %q has no source files to index (root_path: %q).\n"+
+				"The folder may be empty or contain no recognized source file types.",
+			name, proj.RootPath)
+	}
+
+	return fmt.Sprintf(
+		"No results — project %q is not indexed yet (0 chunks, but %d source files found at %q).\n"+
+			"Call rag_index_project with project_id=%d to index, then search again.\n"+
+			"First index scans all source files (~20s for ~100 files). Subsequent indexes use manifest delta (only changed files).",
+		name, sourceFileCount, proj.RootPath, pid)
+}
+
+// countSourceFiles walks a path and counts recognized source files.
+func countSourceFiles(rootPath string) int {
+	count := 0
+	filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if indexer.ShouldSkipDirPublic(info.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if indexer.IsSourceFilePublic(path) {
+			count++
+		}
+		return nil
+	})
+	return count
 }
 
 // extractProjectArgs pulls project_id (float64 from JSON) and project (string)
@@ -486,21 +533,7 @@ func (t *RetrieveContextTool) Handle(ctx context.Context, args map[string]any) (
 		return ToolResult{}, err
 	}
 	if len(results) == 0 {
-		stats, statsErr := t.client.GetStats(ctx, name)
-		if statsErr == nil && stats.PointsCount == 0 {
-			pid := projectID
-			if pid == 0 {
-				if p, pErr := t.client.GetProject(ctx, name); pErr == nil {
-					pid = p.ID
-				}
-			}
-			return ToolResult{
-				Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
-					"No context found — project %q is not indexed (0 chunks).\n"+
-						"Call rag_index_project with project_id=%d to index first.",
-					name, pid)}},
-			}, nil
-		}
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: emptySearchMessage(ctx, t.client, name, projectID)}}}, nil
 	}
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: formatContext(query, name, results)}},
