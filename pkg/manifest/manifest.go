@@ -19,6 +19,9 @@ import (
 	"time"
 )
 
+// lockFileSuffix is used for advisory file locks on manifest writes.
+// Prevents race conditions when multiple MCP processes index the same project.
+
 // FileEntry tracks one file's indexed state.
 type FileEntry struct {
 	Hash string `json:"h"`   // content hash (FNV-1a, hex)
@@ -103,6 +106,7 @@ func Load(projectID string) (*Manifest, error) {
 }
 
 // Save writes the manifest for a project. Creates directories as needed.
+// Uses an advisory lock file to prevent concurrent writes from multiple MCP processes.
 func Save(m *Manifest) error {
 	p, err := manifestPath(m.ProjectID)
 	if err != nil {
@@ -112,6 +116,14 @@ func Save(m *Manifest) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create manifest dir: %w", err)
 	}
+
+	// Advisory lock: create lock file, retry for up to 10s if held by another process.
+	lockPath := p + ".lock"
+	if err := waitForLock(lockPath, 10*time.Second); err != nil {
+		return fmt.Errorf("manifest lock: %w", err)
+	}
+	defer os.Remove(lockPath)
+
 	m.IndexedAt = time.Now().UTC()
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -121,6 +133,34 @@ func Save(m *Manifest) error {
 		return fmt.Errorf("write manifest: %w", err)
 	}
 	return nil
+}
+
+// waitForLock tries to create a lock file exclusively, retrying until timeout.
+// Uses O_CREATE|O_EXCL for atomic cross-process locking.
+func waitForLock(lockPath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "%d", os.Getpid())
+			f.Close()
+			return nil
+		}
+		if !os.IsExist(err) {
+			return err
+		}
+		// Check if lock is stale (older than 5 minutes = crashed process).
+		if info, statErr := os.Stat(lockPath); statErr == nil {
+			if time.Since(info.ModTime()) > 5*time.Minute {
+				os.Remove(lockPath)
+				continue
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for lock: %s", lockPath)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // Delete removes the manifest for a project (on project delete).

@@ -1233,13 +1233,21 @@ func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (To
 
 	if doIndex {
 		pf := buildPatternFilter(args)
-		stats, err := localIndexWithPatterns(ctx, t.client, name, rootPath, pf)
+		stats, wasDelta, err := IndexWithManifest(ctx, t.client, *p, rootPath, pf)
 		if err != nil {
 			sb.WriteString(fmt.Sprintf("WARNING: indexing failed: %v\n", err))
 			sb.WriteString("Call rag_index_project manually to retry.\n")
 		} else {
-			sb.WriteString(fmt.Sprintf("Indexing complete: %d files, %d chunks, %d embedded, %d stored (%s).\n",
-				stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration))
+			mode := "full"
+			if wasDelta {
+				mode = "delta"
+			}
+			if stats.FilesScanned == 0 && !wasDelta {
+				sb.WriteString("Index: already up to date — no changes since last index.\n")
+			} else {
+				sb.WriteString(fmt.Sprintf("Indexing complete [%s]: %d files, %d chunks, %d embedded, %d stored (%s).\n",
+					mode, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration))
+			}
 			// Start file watcher for auto re-index.
 			if t.wm != nil {
 				t.wm.StartWatching(name, fmt.Sprintf("%d", p.ID), rootPath)
