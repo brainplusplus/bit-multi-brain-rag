@@ -41,68 +41,65 @@ bit-rag exposes **6 tools** via MCP:
 
 | Tool | Purpose |
 |------|---------|
-| `rag_project_status` | Check if a project is registered + indexed. **Call this first at session start.** |
-| `rag_create_project` | Register a new project + trigger initial indexing. Idempotent. |
-| `rag_index_project` | Trigger background re-indexing (after code changes). |
-| `rag_list_projects` | List all registered projects. |
-| `rag_search_code` | Semantic search. Returns ranked chunks with file paths + scores. |
-| `rag_retrieve_context` | Same as search, but pre-formatted as paste-ready context with `[score]` prefixes. |
+| `rag_create_project` | Register a project by root_path + trigger indexing. **Idempotent by path** — call on every project open. Returns `project_id`. |
+| `rag_project_status` | Check if a project is registered + indexed. Use `project_id`. |
+| `rag_list_projects` | List all projects with ID + name + root_path. |
+| `rag_search_code` | Semantic search. Returns ranked chunks with file paths + scores. Use `project_id`. |
+| `rag_retrieve_context` | Same as search, but pre-formatted as paste-ready context with `[score]` prefixes. Use `project_id`. |
+| `rag_index_project` | Trigger background re-indexing. Use `project_id`. |
+
+## Project identity: `project_id` is the key
+
+**Always use `project_id` (numeric) in tool calls.** Project names are
+cosmetic labels and may collide (e.g. two folders named "mitm" in different
+paths). The numeric ID is guaranteed unique.
+
+The `project` (name) parameter is accepted as a **fallback** only when you
+don't have the ID.
 
 ## Session start workflow (AUTO-ONBOARD)
 
 **When opening a project folder (new or existing), the agent MUST do this
-before accepting search queries:**
+first:**
 
 ```
-1. Detect project name
-   - Derive from folder name (e.g. /home/user/my-app -> "my-app")
-   - Or ask the user for a project name
+1. rag_create_project(root_path="<absolute-source-path>")
+   → Dashboard checks: already registered by this path?
+     ├── YES → returns existing project_id (no re-index)
+     └── NO  → creates project + triggers indexing, returns new project_id
+   → Save the returned project_id for all subsequent calls
 
-2. Call rag_project_status with the project name
-   ├── "NOT registered" → call rag_create_project (name + root_path)
-   │                       → wait ~30s for initial indexing
-   ├── "registered, indexed=0" → call rag_index_project
-   │                               → wait ~30s
-   ├── "registered, indexed=N" → ready to search ✓
-   └── "registered, status=running" → wait, poll again in 10s
-
-3. Once indexed, proceed with normal workflow (search/retrieve)
+2. Use project_id in all subsequent calls:
+   rag_search_code(project_id=N, query="...")
+   rag_retrieve_context(project_id=N, query="...")
+   rag_index_project(project_id=N)
 ```
 
-**Do NOT ask the user to manually create projects via the dashboard.** The
-agent owns the lifecycle — use `rag_create_project` autonomously.
+**Do NOT ask the user to manually create projects or look up IDs.** The
+`rag_create_project` tool is idempotent — calling it on every session start
+is safe and returns the same `project_id` if already registered.
 
 ### root_path note
 
-`root_path` in `rag_create_project` must be the path **as seen from the
-dashboard server**, not from the MCP client. For local dev (dashboard in
-Docker), this is typically the container mount path (e.g. `/code` if you
-mounted `-v /host/path:/code`). For remote deploy, it's the server
-filesystem path.
+`root_path` must be the path **as seen from the dashboard server**, not from
+the MCP client. For local dev (dashboard in Docker), this is typically the
+container mount path (e.g. `/code` if you mounted `-v /host/path:/code`).
+For remote deploy, it's the server filesystem path.
 
 If unsure, ask the user: "What is the source code path as seen from the
 dashboard server?"
 
-## Workflow
-
-### Session start (auto-onboard)
-
-1. Detect project name from folder.
-2. Call `rag_project_status` to check registration + index state.
-3. If not registered → `rag_create_project` (auto-indexes).
-4. If registered but empty → `rag_index_project`.
-5. Wait for indexing (~30s for small projects).
-6. Now ready to search.
+## Workflow after onboard
 
 ### Before coding (retrieve context)
 
-1. Call `rag_retrieve_context` with the project name + a natural-language
+1. Call `rag_retrieve_context` with `project_id` + a natural-language
    description of the task.
 2. Read the returned context. If relevant, cite `File:Lines` in your plan.
 
 ### After coding (refresh index)
 
-1. Call `rag_index_project` with the project name.
+1. Call `rag_index_project` with `project_id`.
 2. Wait ~30s (background job), then search will reflect new content.
 
 ## Query writing rules
@@ -350,26 +347,19 @@ After configuring, restart the coding tool and verify the MCP connection:
    - `DASHBOARD_API_KEY` matches the server's `DASHBOARD_API_KEYS`
    - The binary path is correct and executable
 
-### 5. Generate AGENTS.md / CLAUDE.md (optional)
-
-To enable auto-use RAG workflow in a target project, create or merge
-`AGENTS.md` and `CLAUDE.md` using the templates in
-`skills/factory/templates/`. These tell agents to always retrieve context
-before coding and index after changes.
-
 ## Failure modes & recovery
 
 | Symptom | Cause | Recovery |
 |---|---|---|
 | "dashboard healthz failed at boot" | DASHBOARD_URL wrong or server down | Verify URL + server status |
 | "search backend unavailable" (503) | Qdrant or embedder offline server-side | Check dashboard logs |
-| "no matches" with valid query | Project not indexed / wrong name / empty index | Call `rag_index_project`, then retry |
+| "no matches" with valid query | Project not indexed / empty index | Call `rag_index_project` with project_id |
 | "401 unauthorized" | DASHBOARD_API_KEY mismatch | Verify key matches server config |
-| Empty project list | No projects registered | Create a project via dashboard UI |
+| "project_id N not found" | Invalid ID | Call `rag_list_projects` to get valid IDs |
 
 ## Privacy
 
-Only `{project, query, limit}` leaves the user's machine per search. Source
+Only `{project_id/project, query, limit}` leaves the user's machine per search. Source
 code is sent only during indexing (and only if the dashboard is remote).
 The index lives server-side in Qdrant. Treat queries as sensitive when
 working on confidential codebases.

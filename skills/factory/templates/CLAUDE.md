@@ -6,20 +6,27 @@ This project has a `bit-rag` MCP server installed for semantic code search.
 
 When you start working on this project:
 
-1. Call `rag_project_status` with project name `PROJECT_NAME`.
-2. If "NOT registered" → call `rag_create_project` (name=`PROJECT_NAME`,
-   root_path = the source path as seen from the dashboard server).
-3. If "registered, indexed=0" → call `rag_index_project`.
-4. Wait ~30s for indexing, then proceed.
+1. Call `rag_create_project` with `root_path` = the source code path as seen
+   from the dashboard server.
+   - If already registered → returns existing `project_id`
+   - If new → creates project + triggers indexing, returns `project_id`
+2. Save the `project_id` for all subsequent calls.
+3. If indexing was triggered, wait ~30s for it to complete.
 
-**Do not ask the user to manually create or index.** You own the lifecycle.
+**Do not ask the user to manually create or look up IDs.** `rag_create_project`
+is idempotent by root_path.
+
+## Project identity: use `project_id`
+
+**Always use `project_id` (numeric) in tool calls.** It is guaranteed unique.
+The `project` (name) parameter is a fallback only.
 
 ## RAG workflow
 
 ### Before making significant changes
 
-1. Call `rag_retrieve_context` with the project name `PROJECT_NAME` and a
-   natural-language description of the task.
+1. Call `rag_retrieve_context` with `project_id` and a natural-language
+   description of the task.
 2. Read the returned context. If it is empty or irrelevant, continue as normal.
 3. If the context reveals existing patterns or constraints, factor them into
    your approach.
@@ -27,14 +34,8 @@ When you start working on this project:
 ### After completing work
 
 1. Summarize what you changed and why.
-2. Call `rag_index_project` with the project name `PROJECT_NAME` to refresh
-   the RAG index with your changes.
-3. The index update runs in background (~30s). Subsequent searches will
-   reflect the new code.
-
-## Project name
-
-Use project name: `PROJECT_NAME`
+2. Call `rag_index_project` with `project_id` to refresh the RAG index.
+3. Wait ~30s for background indexing. Subsequent searches will reflect the new code.
 
 ## Search guidelines
 
@@ -63,5 +64,5 @@ bit-rag uses **hybrid search** (dense embeddings + BM25 keyword + RRF):
 
 - Cite `File:Lines` from search results in your replies so the user can verify.
 - If search results are irrelevant, refine the query rather than increasing `limit`.
-- Each project has its own isolated collection — never search the wrong project.
-- Do not index more often than necessary (indexing re-embeds all files).
+- Each project has its own isolated collection — use the correct `project_id`.
+- Do not index more often than necessary (indexing re-embeds all changed files).

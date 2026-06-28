@@ -6,29 +6,32 @@ This project uses `bit-rag` MCP server for semantic code search.
 
 When you start working on this project, **before accepting search queries**:
 
-1. Call `rag_project_status` with project name `PROJECT_NAME`.
-2. If "NOT registered" → call `rag_create_project` with name `PROJECT_NAME`
-   and the correct `root_path`.
-3. If "registered, indexed=0" → call `rag_index_project`.
-4. Wait ~30s for indexing, then proceed.
+1. Call `rag_create_project` with `root_path` = the source code path as seen
+   from the dashboard server.
+   - If already registered → returns existing `project_id`
+   - If new → creates project + triggers indexing, returns `project_id`
+2. Save the `project_id` for all subsequent calls.
+3. If indexing was triggered, wait ~30s for it to complete.
 
-**Do not ask the user to manually create or index projects.** You own the lifecycle.
+**Do not ask the user to manually create or look up IDs.** `rag_create_project`
+is idempotent by root_path.
+
+## Project identity: use `project_id`
+
+**Always use `project_id` (numeric) in tool calls.** It is guaranteed unique.
+The `project` (name) parameter is a fallback only.
 
 ## Before you start coding
 
-1. Call `rag_retrieve_context` with the user's task/query and the project name `PROJECT_NAME`.
+1. Call `rag_retrieve_context` with `project_id` + the user's task/query.
 2. Read the returned context. If it is empty or irrelevant, continue as normal.
 3. If the context changes how you would approach the task, explain the relevant insights briefly.
 
 ## After you finish coding
 
 1. Summarize what you changed and why.
-2. Call `rag_index_project` with the project name `PROJECT_NAME` to refresh the index.
+2. Call `rag_index_project` with `project_id` to refresh the index.
 3. Wait ~30s for background indexing, then new search results will reflect your changes.
-
-## Project name
-
-Use project name: `PROJECT_NAME`
 
 ## When to search (retrieve)
 
@@ -56,4 +59,4 @@ natural-language and exact-identifier queries work:
 
 - Always cite `File:Lines` from search results in your replies.
 - If results are off-topic, refine the query — do not increase `limit`.
-- Each project has its own collection. Do not search the wrong project.
+- Each project has its own collection. Use the correct `project_id`.
