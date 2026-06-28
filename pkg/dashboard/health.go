@@ -79,10 +79,15 @@ func (s *Server) probeHealth(ctx context.Context) healthData {
 func (s *Server) renderHealthWidget(data healthData) string {
 	var sb strings.Builder
 	sb.WriteString("<div id='health-widget' class='health-widget' hx-get='/ui/health' hx-trigger='every 30s' hx-swap='outerHTML'>")
+	// Storage label: "Qdrant" in Docker mode, "zvec" in embedded mode
+	storageLabel := "Qdrant"
+	if s.cfg.ZvecPath != "" {
+		storageLabel = "zvec"
+	}
 	// Status rows
 	sb.WriteString("<div class='health-row'>")
 	sb.WriteString(fmt.Sprintf("<span class='health-dot %s'></span>", healthDotClass(data.QdrantStatus)))
-	sb.WriteString(fmt.Sprintf("<span>Qdrant</span>"))
+	sb.WriteString(fmt.Sprintf("<span>%s</span>", storageLabel))
 	if data.QdrantPoints > 0 {
 		sb.WriteString(fmt.Sprintf("<span style='margin-left:auto;font-family:var(--mono)'>%d pts</span>", data.QdrantPoints))
 	}

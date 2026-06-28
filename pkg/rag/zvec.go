@@ -199,10 +199,72 @@ func (z *ZvecClient) ListPoints(ctx context.Context, key CollectionKey, metaFilt
 }
 
 // Scroll returns one page of points (for chunks browser).
+// zvec doesn't have native scroll, so we use FTS with a broad match
+// to retrieve documents. This is best-effort — not true pagination.
 func (z *ZvecClient) Scroll(ctx context.Context, key CollectionKey, opts ScrollOpts) (ScrollResult, error) {
-	// Ponytail: chunks browser not supported in embedded mode. Use dashboard
-	// with Qdrant mode for full chunks browsing. Upgrade when zvec-go adds scroll.
-	return ScrollResult{}, nil
+	collection, err := z.getOrCreate(key)
+	if err != nil {
+		return ScrollResult{}, err
+	}
+
+	limit := opts.Limit
+	if limit == 0 || limit > 500 {
+		limit = 500
+	}
+
+	// Use FTS with match to get documents. Empty match gets all.
+	q := zvec.NewSearchQuery()
+	q.SetTopK(limit)
+	q.SetOutputFields([]string{"source_file", "language", "symbol", "name", "start_line", "end_line", "content"})
+
+	// If we have a filter (e.g. language=go), apply it
+	if opts.Filter != nil {
+		if lang, ok := opts.Filter["language"]; ok {
+			if must, ok := lang.(map[string]any); ok {
+				if match, ok := must["match"].(map[string]any); ok {
+					if v, ok := match["value"].(string); ok {
+						q.SetFilter(fmt.Sprintf("language = \"%s\"", v))
+					}
+				}
+			}
+		}
+	}
+
+	docs, err := collection.Query(q)
+	if err != nil {
+		return ScrollResult{}, fmt.Errorf("zvec scroll query: %w", err)
+	}
+
+	points := make([]Point, 0, len(docs))
+	for _, d := range docs {
+		meta := make(map[string]string)
+		if v, err := d.GetStringField("source_file"); err == nil {
+			meta["source_file"] = v
+		}
+		if v, err := d.GetStringField("language"); err == nil {
+			meta["language"] = v
+		}
+		if v, err := d.GetStringField("symbol"); err == nil {
+			meta["symbol"] = v
+		}
+		if v, err := d.GetStringField("name"); err == nil {
+			meta["name"] = v
+		}
+		if v, err := d.GetInt64Field("start_line"); err == nil {
+			meta["start_line"] = fmt.Sprintf("%d", v)
+		}
+		if v, err := d.GetInt64Field("end_line"); err == nil {
+			meta["end_line"] = fmt.Sprintf("%d", v)
+		}
+		content, _ := d.GetStringField("content")
+		points = append(points, Point{
+			ID:      d.GetPK(),
+			Content: content,
+			Meta:    meta,
+		})
+	}
+
+	return ScrollResult{Points: points}, nil
 }
 
 // GetPoint returns a single point by ID.

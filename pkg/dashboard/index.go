@@ -422,7 +422,7 @@ func jobToJSON(j *jobs.Job) map[string]any {
 // indexed (no job rows). It is still inside the #index-stats div so HTMX
 // outerHTML swaps work cleanly.
 func emptyIndexStats() string {
-	return "<div id='index-stats' class='small muted'>No index run yet — click <strong>Re-index project</strong> to start.</div>"
+	return "<div id='index-stats' class='small muted'>Use <code>rag_index_project</code> via MCP or CLI to index.</div>"
 }
 
 // renderJobStatus is the HTML partial that drives the UI's live indexing
