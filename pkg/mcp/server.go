@@ -202,7 +202,9 @@ func (s *Server) Serve(ctx context.Context) error {
 			if err == io.EOF {
 				return nil
 			}
-			return fmt.Errorf("decode rpc: %w", err)
+			// Malformed JSON — log and continue, don't crash the process.
+			s.logger.Warn("decode rpc error (skipping message)", "error", err)
+			continue
 		}
 		s.handleMessage(ctx, msg, encoder)
 	}
@@ -217,7 +219,15 @@ type rpcRequest struct {
 }
 
 // handleMessage dispatches a single JSON-RPC message.
+// Panic recovery prevents MCP process crash (which would break the session).
 func (s *Server) handleMessage(ctx context.Context, raw json.RawMessage, enc *json.Encoder) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("panic in handleMessage", "panic", r)
+			s.sendError(enc, nil, -32603, fmt.Sprintf("internal error: %v", r))
+		}
+	}()
+
 	var req rpcRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		s.sendError(enc, nil, -32700, "parse error: "+err.Error())
@@ -254,6 +264,16 @@ func (s *Server) handleMessage(ctx context.Context, raw json.RawMessage, enc *js
 
 // handleToolCall executes a tools/call request.
 func (s *Server) handleToolCall(ctx context.Context, req rpcRequest, enc *json.Encoder) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("panic in tool call", "tool", req.Method, "panic", r)
+			s.sendResult(enc, req.ID, map[string]any{
+				"content": []ContentBlock{{Type: "text", Text: fmt.Sprintf("Internal error (recovered): %v", r)}},
+				"isError": true,
+			})
+		}
+	}()
+
 	var params struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`

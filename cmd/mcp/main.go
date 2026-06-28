@@ -84,14 +84,24 @@ func runMCP(logger *slog.Logger) {
 		os.Exit(1)
 	}
 
-	bootCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Retry dashboard healthz for up to 60s (dashboard may still be starting).
+	bootCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := client.Healthz(bootCtx); err != nil {
-		logger.Error("dashboard healthz failed at boot", "url", cfg.DashboardURL, "error", err)
-		fmt.Fprintln(os.Stderr, "→ Check DASHBOARD_URL is reachable and the dashboard is running.")
-		os.Exit(1)
+	retries := 0
+	for {
+		if err := client.Healthz(bootCtx); err == nil {
+			break
+		}
+		retries++
+		if retries >= 30 {
+			logger.Error("dashboard healthz failed after 30 retries", "url", cfg.DashboardURL)
+			fmt.Fprintln(os.Stderr, "→ Check DASHBOARD_URL is reachable and the dashboard is running.")
+			os.Exit(1)
+		}
+		logger.Warn("dashboard not ready, retrying...", "retry", retries, "url", cfg.DashboardURL)
+		time.Sleep(2 * time.Second)
 	}
-	logger.Info("dashboard healthy", "url", cfg.DashboardURL)
+	logger.Info("dashboard healthy", "url", cfg.DashboardURL, "retries", retries)
 
 	srv := mcp.New(client, logger)
 
