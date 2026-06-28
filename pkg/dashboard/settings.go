@@ -11,20 +11,30 @@ import (
 
 // uiSettingsPanel renders the Settings page (currently: GPU runtime card).
 func (s *Server) uiSettingsPanel(c echo.Context) error {
+	// Check if running in embedded (zvec) mode
+	embeddedMode := s.cfg.ZvecPath != ""
+
 	st := detectGPU(c.Request().Context())
 	st.CurrentMode = s.store.GetSetting(c.Request().Context(), "embedder_mode")
 	if st.CurrentMode == "" {
-		st.CurrentMode = "cpu"
+		if embeddedMode {
+			st.CurrentMode = "local"
+		} else {
+			st.CurrentMode = "cpu"
+		}
 	}
-	st.EmbedderImage, st.EmbedderStatus = embedderContainerInfo(c.Request().Context())
+	if !embeddedMode {
+		st.EmbedderImage, st.EmbedderStatus = embedderContainerInfo(c.Request().Context())
+	}
 
 	var sb strings.Builder
 	sb.WriteString("<div id='main' class='main settings-panel'>")
 	sb.WriteString("<h2>Settings</h2>")
 	sb.WriteString("<p class='muted small'>Runtime, hardware, and provider defaults.</p>")
 
-	// Health issues banner (above the runtime card so it's the first thing users see)
-	for _, issue := range st.HealthIssues() {
+	// Health issues banner (skip Docker-specific issues in embedded mode)
+	if !embeddedMode {
+		for _, issue := range st.HealthIssues() {
 		cls := "banner error"
 		icon := "⚠"
 		if issue.Severity == "warn" {
@@ -40,6 +50,7 @@ func (s *Server) uiSettingsPanel(c echo.Context) error {
 		}
 		sb.WriteString("</div>")
 	}
+	} // end if !embeddedMode
 
 	sb.WriteString("<section class='settings-card' style='margin-top:24px'>")
 	sb.WriteString("<h3>Embedder runtime</h3>")
@@ -82,9 +93,24 @@ func (s *Server) uiSettingsPanel(c echo.Context) error {
 	}
 	sb.WriteString("</div></div>")
 
-	// Container toolkit
-	sb.WriteString("<div class='settings-row'>")
-	sb.WriteString("<div class='settings-row-label'>Container toolkit</div>")
+	if embeddedMode {
+		// Embedded mode: no Docker container management needed
+		sb.WriteString("<div class='settings-row'>")
+		sb.WriteString("<div class='settings-row-label'>Storage</div>")
+		sb.WriteString("<div class='settings-row-value'><span class='badge accent'>zvec embedded</span> <span class='muted small'>in-process, no Docker</span></div>")
+		sb.WriteString("</div>")
+
+		sb.WriteString("<div class='settings-row'>")
+		sb.WriteString("<div class='settings-row-label'>Embedder</div>")
+		sb.WriteString("<div class='settings-row-value'><span class='badge accent'>local binary</span> <span class='muted small'>" + template.HTMLEscapeString(s.cfg.EmbeddingEndpoint) + "</span></div>")
+		sb.WriteString("</div>")
+
+		sb.WriteString("<div class='muted small' style='margin-top:16px;padding-top:16px;border-top:1px solid var(--border)'>Running in zero-setup mode. No Docker containers managed by dashboard.</div>")
+	} else {
+		// Docker mode: show container toolkit + switch buttons
+		// Container toolkit
+		sb.WriteString("<div class='settings-row'>")
+		sb.WriteString("<div class='settings-row-label'>Container toolkit</div>")
 	sb.WriteString("<div class='settings-row-value'>")
 	if st.ContainerToolkit {
 		sb.WriteString("<span class='badge accent'>nvidia-container-runtime ready</span>")
@@ -123,6 +149,7 @@ func (s *Server) uiSettingsPanel(c echo.Context) error {
 	}
 	sb.WriteString("<div class='muted small' style='margin-top:8px'>The switch is automated: pre-flight check → pull image → stop old → start new → health probe → persist. On failure, auto-rollback to the previous image.</div>")
 	sb.WriteString("</div></div>")
+	} // end Docker mode
 
 	// Search configuration section (ADR-0008: hybrid search)
 	sb.WriteString("<section class='settings-card' style='margin-top:24px'>")

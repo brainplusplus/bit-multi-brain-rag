@@ -19,7 +19,7 @@ if (Test-Path $envFile) {
 }
 
 # Override for embedded mode
-$env:HTTP_ADDR = ":8082"
+$env:HTTP_ADDR = ":8081"
 $env:ENVIRONMENT = "development"
 $env:ZVEC_PATH = Join-Path $RepoRoot "data\zvec"
 $env:DB_PATH = Join-Path $RepoRoot "data\dashboard-local.db"
@@ -37,7 +37,7 @@ if (-not (Test-Path (Join-Path $binDir "zvec_c_api.dll"))) {
 }
 
 Write-Host "Starting bit-rag dashboard (embedded mode)..." -ForegroundColor Cyan
-Write-Host "  Dashboard:  http://localhost:8082" -ForegroundColor Green
+Write-Host "  Dashboard:  http://localhost:8081" -ForegroundColor Green
 Write-Host "  Storage:    zvec embedded ($env:ZVEC_PATH)" -ForegroundColor Green
 Write-Host "  Embedder:   $env:EMBEDDING_ENDPOINT" -ForegroundColor Green
 Write-Host "  Press Ctrl+C to stop." -ForegroundColor DarkGray
