@@ -254,6 +254,9 @@ func (s *Server) createProject(c echo.Context) error {
 		RootPath:    req.RootPath,
 		Description: req.Description,
 		Domains:     req.Domains,
+		MachineID:   c.Request().Header.Get("X-Machine-ID"),
+		MachineName: c.Request().Header.Get("X-Machine-Name"),
+		MachineOS:   c.Request().Header.Get("X-Machine-OS"),
 	}
 	created, err := s.store.CreateProject(c.Request().Context(), p)
 	if err != nil {

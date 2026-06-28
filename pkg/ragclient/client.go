@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/machineid"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
 )
 
@@ -48,12 +49,16 @@ type Config struct {
 //
 // It implements ONLY the surface MCP needs (search). It is NOT a full SDK.
 type Client struct {
-	baseURL string
-	apiKey  string
-	http    *http.Client
+	baseURL    string
+	apiKey     string
+	http       *http.Client
+	machineID  string
+	machineNm  string
+	machineOS  string
 }
 
-// New constructs a client.
+// New constructs a client. Machine ID/Name/OS are resolved once and sent
+// as X-Machine-* headers on every request for multi-machine support.
 func New(cfg Config) (*Client, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("ragclient: BaseURL is required")
@@ -65,11 +70,29 @@ func New(cfg Config) (*Client, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &Client{
-		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:  cfg.APIKey,
-		http:    &http.Client{Timeout: timeout},
-	}, nil
+	mID, _ := machineid.ProtectedID()
+	c := &Client{
+		baseURL:   strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:    cfg.APIKey,
+		http:      &http.Client{Timeout: timeout},
+		machineID: mID,
+		machineNm: machineid.Hostname(),
+		machineOS: machineid.OS(),
+	}
+	return c, nil
+}
+
+// setMachineHeaders adds X-Machine-* headers to a request.
+func (c *Client) setMachineHeaders(req *http.Request) {
+	if c.machineID != "" {
+		req.Header.Set("X-Machine-ID", c.machineID)
+	}
+	if c.machineNm != "" {
+		req.Header.Set("X-Machine-Name", c.machineNm)
+	}
+	if c.machineOS != "" {
+		req.Header.Set("X-Machine-OS", c.machineOS)
+	}
 }
 
 // searchRequest mirrors dashboard.searchReq.
@@ -112,6 +135,7 @@ func (c *Client) Search(ctx context.Context, project, query string, limit int) (
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
 	req.Header.Set("User-Agent", "bit-rag-mcp/1.0")
 
 	resp, err := c.http.Do(req)
@@ -173,6 +197,9 @@ type Project struct {
 	RootPath    string `json:"root_path"`
 	Description string `json:"description"`
 	Domains     string `json:"domains"`
+	MachineID   string `json:"machine_id"`
+	MachineName string `json:"machine_name"`
+	MachineOS   string `json:"machine_os"`
 }
 
 // ListProjects returns all registered projects.
@@ -183,6 +210,7 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 		return nil, fmt.Errorf("ragclient: new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ragclient: do request: %w", err)
@@ -212,6 +240,7 @@ func (c *Client) IndexProject(ctx context.Context, project string) (string, erro
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("ragclient: do request: %w", err)
@@ -280,6 +309,7 @@ func (c *Client) UploadAndIndex(ctx context.Context, project string, docs []Uplo
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
 
 		resp, err := c.http.Do(req)
 		if err != nil {
@@ -322,6 +352,7 @@ func (c *Client) GetIndexStatus(ctx context.Context, project string) (*IndexStat
 		return nil, fmt.Errorf("ragclient: new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ragclient: do request: %w", err)
@@ -354,6 +385,7 @@ func (c *Client) CreateProject(ctx context.Context, name, rootPath, description 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	c.setMachineHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ragclient: do request: %w", err)
@@ -422,6 +454,10 @@ func (c *Client) GetProjectByPath(ctx context.Context, rootPath string) (*Projec
 	normalized := normalizePath(rootPath)
 	for i := range projects {
 		if normalizePath(projects[i].RootPath) == normalized {
+			// Multi-machine: prefer same machine_id, but accept any if no match.
+			if c.machineID != "" && projects[i].MachineID != "" && projects[i].MachineID != c.machineID {
+				continue // different machine
+			}
 			return &projects[i], nil
 		}
 	}

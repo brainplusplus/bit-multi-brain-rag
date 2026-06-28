@@ -72,6 +72,9 @@ func (s *Server) uiCreateProject(c echo.Context) error {
 	}
 	_, err := s.store.CreateProject(c.Request().Context(), store.Project{
 		Name: name, RootPath: rootPath, Description: desc, Domains: domains,
+		MachineID:   c.Request().Header.Get("X-Machine-ID"),
+		MachineName: c.Request().Header.Get("X-Machine-Name"),
+		MachineOS:   c.Request().Header.Get("X-Machine-OS"),
 	})
 	if err != nil {
 		return c.HTML(400, fmt.Sprintf("<p class='error'>%s</p>", template.HTMLEscapeString(err.Error())))
@@ -223,6 +226,12 @@ func (s *Server) renderProjectDetail(p store.Project, jobPartial string) string 
 	sb += "<div class='project-header-meta'>"
 	sb += fmt.Sprintf("<h2>%s</h2>", pname)
 	sb += fmt.Sprintf("<code class='project-path'>%s</code>", template.HTMLEscapeString(p.RootPath))
+	if p.MachineName != "" {
+		sb += fmt.Sprintf("<span class='machine-badge' title='%s on %s'>%s</span>",
+			template.HTMLEscapeString(p.MachineID),
+			template.HTMLEscapeString(p.MachineOS),
+			template.HTMLEscapeString(p.MachineName))
+	}
 	sb += "</div>"
 	sb += "<div class='project-header-actions'>"
 	sb += "<form hx-post='/ui/index' hx-target='#index-stats' hx-swap='outerHTML'>"
@@ -554,6 +563,7 @@ body{font-family:var(--sans);background:var(--bg-base);color:var(--text-primary)
 .project-header-meta{min-width:0;flex:1;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 .project-header-meta h2{font-size:18px;font-weight:600;letter-spacing:-.02em;color:var(--text-primary);margin:0}
 .project-path{font-family:var(--mono);font-size:11.5px;color:var(--text-tertiary);background:var(--bg-surface);padding:3px 8px;border-radius:3px;border:1px solid var(--border-subtle);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60ch;display:inline-block}
+.machine-badge{font-family:var(--mono);font-size:10.5px;color:var(--accent-primary);background:var(--bg-elevated);padding:2px 7px;border-radius:3px;border:1px solid var(--accent-primary);margin-left:6px;white-space:nowrap;cursor:help}
 .project-header-actions{display:flex;gap:8px;flex-shrink:0}
 .project-desc{color:var(--text-secondary);font-size:12px;margin-top:6px}
 .project-search{padding:16px 28px 0}
