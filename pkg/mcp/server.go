@@ -590,9 +590,7 @@ func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 			return nil // skip unreadable
 		}
 		if info.IsDir() {
-			name := info.Name()
-			if name == ".git" || name == "node_modules" || name == "vendor" ||
-				name == "dist" || name == "build" || name == "__pycache__" {
+			if indexer.ShouldSkipDirPublic(info.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
