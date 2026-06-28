@@ -35,10 +35,16 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
+	storageMode := "qdrant"
+	if cfg.ZvecPath != "" {
+		storageMode = "zvec-embedded"
+	}
 	logger.Info("config loaded",
 		"http_addr", cfg.HTTPAddr,
 		"environment", cfg.Environment,
+		"storage_mode", storageMode,
 		"qdrant_url", cfg.QdrantURL,
+		"zvec_path", cfg.ZvecPath,
 		"embedding_endpoint", cfg.EmbeddingEndpoint,
 		"active_model", cfg.ActiveModel,
 		"active_backend", cfg.ActiveBackend,
