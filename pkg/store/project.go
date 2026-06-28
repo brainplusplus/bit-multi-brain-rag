@@ -58,6 +58,10 @@ func Open(dbPath string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate models: %w", err)
 	}
+	if err := s.migrateFingerprints(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate fingerprints: %w", err)
+	}
 	return s, nil
 }
 

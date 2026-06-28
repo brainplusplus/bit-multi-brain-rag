@@ -10,6 +10,8 @@ package indexer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/chunker"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/store"
 )
 
 // charsPerToken is a conservative chars-to-tokens estimate for code.
@@ -43,6 +46,7 @@ type Indexer struct {
 	embed  rag.EmbeddingClient
 	rag    rag.Provider
 	logger *slog.Logger
+	store  *store.Store       // optional: for fingerprint-based incremental indexing
 	// BatchSize is the number of chunks embedded per HTTP call (throughput).
 	BatchSize int
 	// MaxTokensPerChunk is the per-model chunk size cap (in tokens). When 0,
@@ -67,6 +71,14 @@ func New(c *chunker.Chunker, e rag.EmbeddingClient, r rag.Provider, logger *slog
 		BatchSize:         32,
 		MaxTokensPerChunk: defaultMaxTokensPerChunk,
 	}
+}
+
+// WithStore attaches a SQLite store for fingerprint-based incremental indexing.
+// When set, the indexer skips files whose SHA-256 hash hasn't changed since
+// the last indexing run (ADR-0007 Phase 8).
+func (ix *Indexer) WithStore(s *store.Store) *Indexer {
+	ix.store = s
+	return ix
 }
 
 // effectiveMaxTokens returns the configured cap or the legacy default.
@@ -114,7 +126,7 @@ type ProgressFn func(ProgressEvent)
 // existing /api/v1/index JSON handler still compiles during the async
 // rollout; new code should prefer the progress-aware variant.
 func (ix *Indexer) IndexProject(ctx context.Context, project, rootPath string) (IndexStats, error) {
-	return ix.IndexProjectWithProgress(ctx, project, rootPath, nil)
+	return ix.IndexProjectWithProgress(ctx, project, rootPath, 0, nil)
 }
 
 // IndexProjectWithProgress walks rootPath, chunks all supported source files,
@@ -122,9 +134,11 @@ func (ix *Indexer) IndexProject(ctx context.Context, project, rootPath string) (
 // progress callback receives ProgressEvent values at each file boundary and
 // each batch flush. Returns aggregate stats.
 //
+// projectID is used for fingerprint-based incremental indexing (0 = disabled).
+//
 // Cancellation: ctx is checked between file walks and between batches; on
 // ctx.Done the function returns the partial stats and ctx.Err().
-func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPath string, progress ProgressFn) (IndexStats, error) {
+func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPath string, projectID int64, progress ProgressFn) (IndexStats, error) {
 	start := time.Now()
 	stats := IndexStats{}
 	emit := func(current string) {
@@ -176,27 +190,54 @@ func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPa
 		data []byte
 	}
 	var files []fileBatch
+	gi := newGitignoreMatcher()
+	depth := 0
 	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			stats.Errors = append(stats.Errors, fmt.Sprintf("walk %s: %v", path, err))
 			return nil // continue walking
 		}
+		rel, _ := filepath.Rel(rootPath, path)
 		if d.IsDir() {
+			// Track depth for gitignore pattern scoping.
+			if path != rootPath {
+				depth++
+				gi.loadDir(path, depth)
+			}
 			// Skip common non-source dirs.
 			name := d.Name()
 			if shouldSkipDir(name) {
+				gi.pop(depth)
+				depth--
 				return filepath.SkipDir
 			}
+			// Skip if .gitignore matches this directory.
+			if gi.match(rel, true) {
+				gi.pop(depth)
+				depth--
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Skip if .gitignore matches this file.
+		if gi.match(rel, false) {
 			return nil
 		}
 		if !isSourceFile(path) {
 			return nil
 		}
-		rel, _ := filepath.Rel(rootPath, path)
 		data, rerr := readFile(path)
 		if rerr != nil {
 			stats.Errors = append(stats.Errors, fmt.Sprintf("read %s: %v", rel, rerr))
 			return nil
+		}
+		// Incremental: skip unchanged files via SHA-256 fingerprint (ADR-0007 Phase 8).
+		if ix.store != nil && projectID > 0 {
+			hash := sha256Hex(data)
+			if fp, _ := ix.store.GetFingerprint(ctx, projectID, rel); fp != nil && fp.SHA256 == hash {
+				stats.Skipped++
+				return nil // file unchanged, skip
+			}
 		}
 		files = append(files, fileBatch{path: rel, data: data})
 		stats.FilesScanned++
@@ -206,9 +247,25 @@ func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPa
 		return stats, fmt.Errorf("walk %s: %w", rootPath, err)
 	}
 
+	// Stale detection: delete Qdrant points for files no longer present.
+	if ix.store != nil && projectID > 0 {
+		keepPaths := make([]string, len(files))
+		for i, f := range files {
+			keepPaths[i] = f.path
+		}
+		removed, _ := ix.store.DeleteFingerprintsExcept(ctx, projectID, keepPaths)
+		if len(removed) > 0 {
+			ix.logger.Info("stale files detected, deleting points", "count", len(removed))
+			ix.deletePointsByFiles(ctx, key, removed)
+			stats.Skipped += len(removed) // report as skipped (stale removed)
+		}
+	}
+
 	// Chunk all files, accumulating documents + vectors in batches.
 	type pending struct {
-		doc rag.Document
+		doc       rag.Document
+		filePath  string // for fingerprint tracking
+		fileHash  string // SHA-256 of file content
 	}
 	var batch []pending
 	flush := func() error {
@@ -232,6 +289,8 @@ func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPa
 			batch = batch[:0]
 			return nil
 		}
+		// Track point count per file for fingerprint storage.
+		filePointCounts := make(map[string]int)
 		if ix.HybridEnabled {
 			if qc, ok := ix.rag.(*rag.QdrantClient); ok {
 				// Generate BM25 sparse vectors for hybrid search (ADR-0008).
@@ -272,6 +331,20 @@ func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPa
 			} else {
 				stats.Indexed += len(docs)
 				stats.Embedded += len(vecs)
+			}
+		}
+		// Record fingerprints for successfully indexed files (incremental, ADR-0007 Phase 8).
+		if ix.store != nil && projectID > 0 {
+			// Count points per file from the batch.
+			for _, p := range batch {
+				filePointCounts[p.filePath]++
+			}
+			for _, p := range batch {
+				if p.filePath != "" && p.fileHash != "" {
+					if err := ix.store.SetFingerprint(ctx, projectID, p.filePath, p.fileHash, filePointCounts[p.filePath]); err != nil {
+						ix.logger.Warn("fingerprint save failed", "file", p.filePath, "error", err)
+					}
+				}
 			}
 		}
 		batch = batch[:0]
@@ -317,7 +390,7 @@ func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPa
 					"project":     project,
 				},
 			}
-			batch = append(batch, pending{doc: doc})
+			batch = append(batch, pending{doc: doc, filePath: f.path, fileHash: sha256Hex(f.data)})
 			if len(batch) >= ix.BatchSize {
 				_ = flush()
 				// After each flush, surface fresh embed/index counters.
@@ -485,15 +558,46 @@ func shouldSkipDir(name string) bool {
 	return strings.HasPrefix(name, ".")
 }
 
-// sourceExts lists file extensions we attempt AST chunking on.
+// sourceExts lists file extensions we attempt indexing on.
+// AST-aware chunking is used for code languages; the rest fall back to
+// naive line-based chunking (chunker.chunkNaive).
 var sourceExts = map[string]bool{
+	// AST-aware (tree-sitter):
 	".go": true, ".py": true, ".js": true, ".jsx": true, ".mjs": true, ".cjs": true,
 	".ts": true, ".rs": true, ".java": true, ".cs": true,
 	".cpp": true, ".cc": true, ".cxx": true, ".hpp": true, ".h": true, ".hh": true, ".hxx": true,
+	// AST-aware (Jalur B additions):
+	".rb": true, ".php": true, ".sh": true, ".bash": true, ".sql": true,
+	// Naive chunking (text/config/docs):
+	".md": true, ".rst": true, ".txt": true,
+	".json": true, ".yaml": true, ".yml": true, ".toml": true, ".ini": true, ".cfg": true,
+	".tf": true, ".hcl": true,
+	".dockerfile": true,
+	".proto": true, ".graphql": true, ".gql": true,
+	".html": true, ".css": true, ".scss": true, ".less": true,
+	".xml": true, ".svg": true,
+	".lua": true, ".r": true, ".dart": true, ".swift": true, ".kt": true, ".scala": true,
+	".clj": true, ".ex": true, ".exs": true, ".erl": true, ".hs": true, ".ml": true,
+	".vim": true, ".ps1": true, ".bat": true, ".cmd": true,
+	".makefile": true, ".cmake": true,
+	".env": true, ".gitignore": true, ".editorconfig": true,
 }
 
+// isSourceFile returns true if the file should be indexed.
+// Matches by extension OR by basename (for extensionless files like Dockerfile, Makefile).
 func isSourceFile(path string) bool {
-	return sourceExts[strings.ToLower(filepath.Ext(path))]
+	ext := strings.ToLower(filepath.Ext(path))
+	if sourceExts[ext] {
+		return true
+	}
+	// Extensionless files with known basenames.
+	base := strings.ToLower(filepath.Base(path))
+	switch base {
+	case "dockerfile", "makefile", "rakefile", "gemfile", "brewfile", "procfile",
+		".dockerignore", ".gitignore", ".npmignore", ".editorconfig", ".env":
+		return true
+	}
+	return false
 }
 
 // ensureBM25 lazily initializes + fits the BM25 vectorizer on the first batch.
@@ -506,4 +610,38 @@ func (ix *Indexer) ensureBM25(texts []string) {
 	ix.bm25 = rag.NewBM25Vectorizer()
 	ix.bm25.Fit(texts)
 	ix.logger.Info("BM25 vectorizer fitted", "docs", len(texts), "avg_doc_len", ix.bm25.AvgDocLen())
+}
+
+// sha256Hex returns the hex-encoded SHA-256 hash of data.
+func sha256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+// deletePointsByFiles removes Qdrant points for files no longer present.
+// Uses ListPoints to find points with source_file matching removed paths.
+func (ix *Indexer) deletePointsByFiles(ctx context.Context, key rag.CollectionKey, removedPaths []string) {
+	// Scroll all points and find those whose source_file matches.
+	points, err := ix.rag.ListPoints(ctx, key, nil)
+	if err != nil {
+		ix.logger.Warn("stale cleanup: ListPoints failed", "error", err)
+		return
+	}
+	removed := make(map[string]bool, len(removedPaths))
+	for _, p := range removedPaths {
+		removed[p] = true
+	}
+	var toDelete []string
+	for _, pt := range points {
+		if removed[pt.Meta["source_file"]] {
+			toDelete = append(toDelete, pt.ID)
+		}
+	}
+	if len(toDelete) > 0 {
+		if err := ix.rag.DeletePoints(ctx, key, toDelete); err != nil {
+			ix.logger.Warn("stale cleanup: DeletePoints failed", "error", err, "count", len(toDelete))
+		} else {
+			ix.logger.Info("stale points deleted", "count", len(toDelete))
+		}
+	}
 }

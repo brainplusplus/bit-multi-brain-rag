@@ -17,14 +17,28 @@ import (
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/bash"
 	"github.com/smacker/go-tree-sitter/cpp"
 	"github.com/smacker/go-tree-sitter/csharp"
+	"github.com/smacker/go-tree-sitter/css"
+	"github.com/smacker/go-tree-sitter/dockerfile"
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/hcl"
+	"github.com/smacker/go-tree-sitter/html"
 	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/javascript"
+	"github.com/smacker/go-tree-sitter/kotlin"
+	"github.com/smacker/go-tree-sitter/lua"
+	"github.com/smacker/go-tree-sitter/php"
+	"github.com/smacker/go-tree-sitter/protobuf"
 	"github.com/smacker/go-tree-sitter/python"
+	"github.com/smacker/go-tree-sitter/ruby"
 	"github.com/smacker/go-tree-sitter/rust"
+	"github.com/smacker/go-tree-sitter/scala"
+	"github.com/smacker/go-tree-sitter/sql"
+	"github.com/smacker/go-tree-sitter/swift"
 	tstype "github.com/smacker/go-tree-sitter/typescript/typescript"
+	"github.com/smacker/go-tree-sitter/yaml"
 )
 
 // Chunk is a single indexable unit of source code.
@@ -64,6 +78,7 @@ var _ = sitter.Language{} // keep import
 // langByExt resolves a language by file extension.
 func langByExt(ext string) (*languageInfo, bool) {
 	switch strings.ToLower(ext) {
+	// --- Core 8 (original) ---
 	case ".go":
 		return &languageInfo{lang: golang.GetLanguage(), name: "go", defTypes: []string{
 			"function_declaration", "method_declaration", "type_declaration",
@@ -98,6 +113,74 @@ func langByExt(ext string) (*languageInfo, bool) {
 		return &languageInfo{lang: cpp.GetLanguage(), name: "cpp", defTypes: []string{
 			"function_definition", "class_specifier", "struct_specifier",
 		}}, true
+
+	// --- Jalur B additions (AST-aware) ---
+	case ".rb":
+		return &languageInfo{lang: ruby.GetLanguage(), name: "ruby", defTypes: []string{
+			"method", "class", "module",
+		}}, true
+	case ".php":
+		return &languageInfo{lang: php.GetLanguage(), name: "php", defTypes: []string{
+			"function_definition", "class_declaration", "method_declaration", "interface_declaration",
+		}}, true
+	case ".sh", ".bash":
+		return &languageInfo{lang: bash.GetLanguage(), name: "bash", defTypes: []string{
+			"function_definition",
+		}}, true
+	case ".sql":
+		return &languageInfo{lang: sql.GetLanguage(), name: "sql", defTypes: []string{
+			"create_table_statement", "create_function_statement", "create_view_statement",
+			"create_index_statement", "insert_statement", "select_statement",
+		}}, true
+	case ".swift":
+		return &languageInfo{lang: swift.GetLanguage(), name: "swift", defTypes: []string{
+			"function_declaration", "class_definition", "struct_declaration", "protocol_declaration",
+		}}, true
+	case ".kt":
+		return &languageInfo{lang: kotlin.GetLanguage(), name: "kotlin", defTypes: []string{
+			"function_declaration", "class_declaration", "object_declaration",
+		}}, true
+	case ".scala":
+		return &languageInfo{lang: scala.GetLanguage(), name: "scala", defTypes: []string{
+			"function_definition", "class_definition", "object_definition", "trait_definition",
+		}}, true
+	case ".lua":
+		return &languageInfo{lang: lua.GetLanguage(), name: "lua", defTypes: []string{
+			"function_definition", "function_declaration",
+		}}, true
+	case ".proto":
+		return &languageInfo{lang: protobuf.GetLanguage(), name: "protobuf", defTypes: []string{
+			"message", "service", "rpc", "enum",
+		}}, true
+	case ".css", ".scss", ".less":
+		return &languageInfo{lang: css.GetLanguage(), name: "css", defTypes: []string{
+			"rule_set",
+		}}, true
+	case ".html":
+		return &languageInfo{lang: html.GetLanguage(), name: "html", defTypes: []string{
+			"element",
+		}}, true
+	case ".tf", ".hcl":
+		return &languageInfo{lang: hcl.GetLanguage(), name: "hcl", defTypes: []string{
+			"block", "attribute",
+		}}, true
+	case ".yaml", ".yml":
+		return &languageInfo{lang: yaml.GetLanguage(), name: "yaml", defTypes: []string{
+			"block_mapping_pair",
+		}}, true
+	}
+	// Dockerfile handled by basename (no extension).
+	return nil, false
+}
+
+// langByBasename resolves languages for extensionless files (Dockerfile, Makefile).
+func langByBasename(basename string) (*languageInfo, bool) {
+	switch strings.ToLower(basename) {
+	case "dockerfile":
+		return &languageInfo{lang: dockerfile.GetLanguage(), name: "dockerfile", defTypes: []string{
+			"image_spec", "run_instruction", "env_instruction", "cmd_instruction",
+			"copy_instruction", "add_instruction",
+		}}, true
 	}
 	return nil, false
 }
@@ -107,6 +190,10 @@ func langByExt(ext string) (*languageInfo, bool) {
 func (ch *Chunker) ChunkFile(ctx context.Context, source []byte, sourceFile string) ([]Chunk, error) {
 	ext := filepath.Ext(sourceFile)
 	info, ok := langByExt(ext)
+	if !ok {
+		// Try basename (for Dockerfile, Makefile, etc).
+		info, ok = langByBasename(filepath.Base(sourceFile))
+	}
 	if !ok {
 		return ch.chunkNaive(source, sourceFile, ext), nil
 	}

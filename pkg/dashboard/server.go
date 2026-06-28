@@ -93,7 +93,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 
 	chk := chunker.New()
-	idx := indexer.New(chk, emb, qc, logger)
+	idx := indexer.New(chk, emb, qc, logger).WithStore(st)
 	// Apply per-model chunk size from the active registry entry.
 	if activeModel, err := st.GetActiveModel(context.Background()); err == nil {
 		idx.MaxTokensPerChunk = activeModel.EffectiveChunkTokens()

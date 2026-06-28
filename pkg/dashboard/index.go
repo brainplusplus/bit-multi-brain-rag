@@ -10,6 +10,7 @@ import (
 
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/indexer"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/jobs"
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/store"
 )
 
 // indexReq is the body for POST /api/v1/index.
@@ -38,7 +39,8 @@ func (s *Server) indexAPI(c echo.Context) error {
 	if s.indexer == nil || s.jobs == nil {
 		return c.JSON(503, map[string]string{"error": "indexer unavailable (embedder/qdrant offline)"})
 	}
-	job, err := s.jobs.Enqueue(req.Project, rootPath)
+	pid := s.resolveProjectID(c, req.Project)
+	job, err := s.jobs.Enqueue(req.Project, rootPath, pid)
 	if err != nil && !errors.Is(err, jobs.ErrAlreadyRunning) {
 		return c.JSON(500, map[string]string{"error": err.Error()})
 	}
@@ -101,7 +103,8 @@ func (s *Server) uiRunIndex(c echo.Context) error {
 	if s.indexer == nil || s.jobs == nil {
 		return c.HTML(503, "<p class='error'>Indexer unavailable (Qdrant/embedder offline).</p>")
 	}
-	job, err := s.jobs.Enqueue(project, rootPath)
+	pid := s.resolveProjectID(c, project)
+	job, err := s.jobs.Enqueue(project, rootPath, pid)
 	if err != nil && !errors.Is(err, jobs.ErrAlreadyRunning) {
 		return c.HTML(500, fmt.Sprintf("<p class='error'>%s</p>", template.HTMLEscapeString(err.Error())))
 	}
@@ -155,16 +158,34 @@ func (s *Server) resolveRootPath(c echo.Context, project, override string) (stri
 	if override != "" {
 		return override, nil
 	}
+	p, err := s.resolveProject(c, project)
+	if err != nil {
+		return "", err
+	}
+	return p.RootPath, nil
+}
+
+// resolveProject looks up a project by name from the SQLite store.
+func (s *Server) resolveProject(c echo.Context, project string) (*store.Project, error) {
 	projects, err := s.store.ListProjects(c.Request().Context())
 	if err != nil {
-		return "", fmt.Errorf("list projects: %w", err)
+		return nil, fmt.Errorf("list projects: %w", err)
 	}
 	for _, p := range projects {
 		if p.Name == project {
-			return p.RootPath, nil
+			return p, nil
 		}
 	}
-	return "", fmt.Errorf("project %q not found", project)
+	return nil, fmt.Errorf("project %q not found", project)
+}
+
+// resolveProjectID returns the numeric project ID for fingerprint tracking.
+func (s *Server) resolveProjectID(c echo.Context, project string) int64 {
+	p, err := s.resolveProject(c, project)
+	if err != nil {
+		return 0
+	}
+	return p.ID
 }
 
 // jobToJSON projects a Job into a JSON-friendly map. Used by both /api/v1

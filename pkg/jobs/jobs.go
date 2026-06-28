@@ -69,6 +69,7 @@ type Job struct {
 	ID         string
 	Project    string
 	RootPath   string
+	ProjectID  int64  // for fingerprint-based incremental indexing (0 = disabled)
 	Status     Status
 	StartedAt  time.Time
 	FinishedAt time.Time
@@ -135,7 +136,7 @@ func NewManager(st *store.Store, ix *indexer.Indexer, logger *slog.Logger) *Mana
 // Enqueue starts a new indexing job for the given project. If one is already
 // active for the same project, returns the existing Job and ErrAlreadyRunning
 // (caller should treat as idempotent — same project, same work).
-func (m *Manager) Enqueue(project, rootPath string) (*Job, error) {
+func (m *Manager) Enqueue(project, rootPath string, projectID int64) (*Job, error) {
 	m.mu.Lock()
 	if existing, ok := m.active[project]; ok {
 		m.mu.Unlock()
@@ -146,6 +147,7 @@ func (m *Manager) Enqueue(project, rootPath string) (*Job, error) {
 		ID:        uuid.NewString(),
 		Project:   project,
 		RootPath:  rootPath,
+		ProjectID: projectID,
 		Status:    StatusQueued,
 		StartedAt: time.Now().UTC(),
 		cancel:    cancel,
@@ -187,7 +189,7 @@ func (m *Manager) run(ctx context.Context, job *Job) {
 		m.mu.Unlock()
 	}
 
-	stats, err := m.indexer.IndexProjectWithProgress(ctx, job.Project, job.RootPath, progress)
+	stats, err := m.indexer.IndexProjectWithProgress(ctx, job.Project, job.RootPath, job.ProjectID, progress)
 
 	// Decide terminal status. Order matters: ctx.Err() trumps a returned
 	// IndexStats error because cancellation is the user-initiated case.
