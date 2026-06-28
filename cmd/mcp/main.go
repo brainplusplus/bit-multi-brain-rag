@@ -323,13 +323,26 @@ func cliIndex(ctx context.Context, client *ragclient.Client, logger *slog.Logger
 		pf = indexer.NewPatternFilter(includes, excludes)
 	}
 
-	stats, err := mcp.LocalIndexWithPatterns(ctx, client, name, rootPath, pf)
+	proj, err := client.GetProject(ctx, name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Get project: %v\n", err)
+		os.Exit(1)
+	}
+	stats, wasDelta, err := mcp.IndexWithManifest(ctx, client, *proj, rootPath, pf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Index failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Done: %d files, %d chunks, %d embedded, %d stored (%s)\n",
-		stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration)
+	if stats.FilesScanned == 0 && !wasDelta {
+		fmt.Printf("Already up to date — no changes since last index.\n")
+	} else {
+		mode := "full"
+		if wasDelta {
+			mode = "delta"
+		}
+		fmt.Printf("Done [%s]: %d files, %d chunks, %d embedded, %d stored (%s)\n",
+			mode, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration)
+	}
 }
 
 // cliSearch searches a project from the terminal.
@@ -418,7 +431,7 @@ func cliWatch(ctx context.Context, client *ragclient.Client, logger *slog.Logger
 
 	// Use MCP's WatcherManager
 	wm := mcp.NewWatcherManager(client, logger, ctx)
-	wm.StartWatching(name, rootPath)
+	wm.StartWatching(name, fmt.Sprintf("%d", projectID), rootPath)
 
 	fmt.Fprintf(os.Stderr, "Watching project %q (ID: %d, root: %s)\n", name, projectID, rootPath)
 	fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop.\n\n")

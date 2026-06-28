@@ -33,6 +33,7 @@ import (
 
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/chunker"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/indexer"
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/manifest"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/ragclient"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/watcher"
@@ -55,12 +56,14 @@ type WatcherManager struct {
 	client   *ragclient.Client
 	logger   *slog.Logger
 	ctx      context.Context
+	projects map[string]string // key = project name → value = project ID (for manifest)
 }
 
 // NewWatcherManager creates a WatcherManager tied to the MCP server's context.
 func NewWatcherManager(client *ragclient.Client, logger *slog.Logger, ctx context.Context) *WatcherManager {
 	return &WatcherManager{
 		watchers: make(map[string]*watcher.Watcher),
+		projects: make(map[string]string),
 		client:   client,
 		logger:   logger,
 		ctx:      ctx,
@@ -69,9 +72,12 @@ func NewWatcherManager(client *ragclient.Client, logger *slog.Logger, ctx contex
 
 // StartWatching begins watching rootPath for project. If a watcher already
 // exists for this project, it is replaced.
-func (wm *WatcherManager) StartWatching(project, rootPath string) {
+func (wm *WatcherManager) StartWatching(project, projectID, rootPath string) {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
+
+	// Track project ID for manifest updates.
+	wm.projects[project] = projectID
 
 	// Stop existing watcher for this project.
 	if old, ok := wm.watchers[project]; ok {
@@ -93,6 +99,14 @@ func (wm *WatcherManager) StartWatching(project, rootPath string) {
 				"chunks", stats.Chunks,
 				"embedded", stats.Embedded,
 				"duration", stats.Duration)
+
+			// Update manifest with new file states.
+			if pid, ok := wm.projects[project]; ok {
+				if m, err := manifest.Load(pid); err == nil && m != nil {
+					fileList := walkSourceFiles(rootPath, nil)
+					m.ApplyUpdate(rootPath, fileList)
+				}
+			}
 		}()
 	}
 
@@ -555,22 +569,34 @@ func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (Too
 	// Build pattern filter from optional include/exclude args.
 	pf := buildPatternFilter(args)
 
-	// Walk local folder + chunk + upload.
-	stats, err := localIndexWithPatterns(ctx, t.client, name, rootPath, pf)
+	// Manifest-aware index: delta reindex only changed files.
+	stats, wasDelta, err := IndexWithManifest(ctx, t.client, *proj, rootPath, pf)
 	if err != nil {
 		return ToolResult{}, err
 	}
 
 	// Start/refresh file watcher for auto re-index on changes.
 	if t.wm != nil {
-		t.wm.StartWatching(name, rootPath)
+		t.wm.StartWatching(name, fmt.Sprintf("%d", proj.ID), rootPath)
+	}
+
+	mode := "full"
+	if wasDelta {
+		mode = "delta"
+	}
+	if stats.FilesScanned == 0 && wasDelta == false {
+		return ToolResult{
+			Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+				"Project %q is already up to date — no changes detected since last index.\n",
+				name)}},
+		}, nil
 	}
 
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
-			"Indexed project %q (ID: %d).\nFiles scanned: %d\nChunks: %d\nEmbedded: %d\nStored: %d\nDuration: %s\n"+
+			"Indexed project %q (ID: %d) [%s reindex].\nFiles scanned: %d\nChunks: %d\nEmbedded: %d\nStored: %d\nDuration: %s\n"+
 				"File watcher active — changes will auto-reindex.\n",
-			name, projectID, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration)}},
+			name, projectID, mode, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration)}},
 	}, nil
 }
 
@@ -599,11 +625,133 @@ type localIndexStats struct {
 	Embedded     int
 	Stored       int
 	Duration     string
+	ScannedFiles []string // rel paths of all files processed (for manifest update)
 }
 
 // localIndex walks the local folder, chunks files, and uploads to dashboard.
 func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath string) (*localIndexStats, error) {
 	return localIndexWithPatterns(ctx, client, project, rootPath, nil)
+}
+
+// IndexWithManifest is the manifest-aware index entry point.
+// It checks the local manifest for the project and decides:
+//   - No manifest → full index
+//   - Manifest exists, few changes → delta reindex only changed files
+//   - Manifest exists, many changes (>50%) → full reindex
+//   - Manifest says indexed but dashboard has 0 points → full reindex (drift)
+//
+// After indexing, the manifest is updated with new file states.
+func IndexWithManifest(ctx context.Context, client *ragclient.Client, proj ragclient.Project, rootPath string, pf *indexer.PatternFilter) (*LocalIndexStats, bool, error) {
+	pid := fmt.Sprintf("%d", proj.ID)
+
+	// Load existing manifest.
+	m, err := manifest.Load(pid)
+	if err != nil {
+		slog.Warn("manifest load failed, doing full index", "error", err)
+	}
+
+	// Sync drift check: if manifest exists but dashboard has 0 points,
+	// the collection was likely deleted. Force full reindex.
+	if m != nil {
+		stats, err := client.GetStats(ctx, proj.Name)
+		if err == nil && stats.PointsCount == 0 {
+			slog.Info("manifest drift: dashboard has 0 points, full reindex", "project", proj.Name)
+			m = nil // force full
+		}
+	}
+
+	// No manifest → full index.
+	if m == nil {
+		m = manifest.New(pid, proj.Name, rootPath)
+		stats, err := localIndexWithPatterns(ctx, client, proj.Name, rootPath, pf)
+		if err != nil {
+			return nil, false, err
+		}
+		// Save manifest with all scanned files.
+		m.ApplyUpdate(rootPath, stats.ScannedFiles)
+		return stats, false, nil
+	}
+
+	// Manifest exists → walk to get current file list, then diff.
+	fileList := walkSourceFiles(rootPath, pf)
+	diff := m.Compare(rootPath, fileList)
+
+	if !diff.HasChanges() {
+		// Nothing changed — return empty stats.
+		slog.Info("manifest: no changes detected, skipping index", "project", proj.Name)
+		return &localIndexStats{}, false, nil
+	}
+
+	// If >50% of files changed, full reindex is more efficient.
+	changedCount := len(diff.ChangedFiles())
+	if len(fileList) > 0 && changedCount*100/len(fileList) > 50 {
+		slog.Info("manifest: >50% files changed, full reindex", "project", proj.Name, "changed", changedCount, "total", len(fileList))
+		stats, err := localIndexWithPatterns(ctx, client, proj.Name, rootPath, pf)
+		if err != nil {
+			return nil, false, err
+		}
+		m.ApplyUpdate(rootPath, stats.ScannedFiles)
+		return stats, false, nil
+	}
+
+	// Delta reindex only changed files.
+	slog.Info("manifest: delta reindex", "project", proj.Name, "added", len(diff.Added), "modified", len(diff.Modified), "deleted", len(diff.Deleted))
+
+	// Convert rel paths to abs for deltaIndex.
+	absChanged := make([]string, 0, changedCount)
+	for _, rel := range diff.Added {
+		absChanged = append(absChanged, filepath.Join(rootPath, rel))
+	}
+	for _, rel := range diff.Modified {
+		absChanged = append(absChanged, filepath.Join(rootPath, rel))
+	}
+	for _, rel := range diff.Deleted {
+		absChanged = append(absChanged, filepath.Join(rootPath, rel))
+	}
+
+	stats, err := deltaIndex(ctx, client, proj.Name, rootPath, absChanged)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Update manifest: re-walk to get accurate current file list.
+	m.ApplyUpdate(rootPath, fileList)
+	return stats, true, nil
+}
+
+// walkSourceFiles walks rootPath and returns relative paths of all source files.
+// Used for manifest comparison without reading file contents.
+func walkSourceFiles(rootPath string, pf *indexer.PatternFilter) []string {
+	gi, err := indexer.LoadGitignore(rootPath)
+	if err != nil {
+		slog.Warn("gitignore load failed", "error", err)
+	}
+
+	var files []string
+	filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if indexer.ShouldSkipDirPublic(info.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !indexer.IsSourceFilePublic(path) {
+			return nil
+		}
+		rel, _ := filepath.Rel(rootPath, path)
+		if gi != nil && gi.Match(rel) {
+			return nil
+		}
+		if pf != nil && !pf.Match(rel) {
+			return nil
+		}
+		files = append(files, rel)
+		return nil
+	})
+	return files
 }
 
 // localIndexWithPatterns is the core walk+chunk+upload with optional pattern filter.
@@ -694,8 +842,8 @@ func localIndexWithPatterns(ctx context.Context, client *ragclient.Client, proje
 		}
 
 		stats.FilesScanned++
-
 		relPath, _ := filepath.Rel(rootPath, path)
+		stats.ScannedFiles = append(stats.ScannedFiles, relPath)
 		chunks, err := ch.ChunkFile(ctx, data, relPath)
 		if err != nil {
 			slog.Warn("chunk failed", "file", relPath, "error", err)
@@ -796,6 +944,7 @@ func deltaIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 		}
 
 		stats.FilesScanned++
+		stats.ScannedFiles = append(stats.ScannedFiles, relPath)
 
 		chunks, err := ch.ChunkFile(ctx, data, relPath)
 		if err != nil {
@@ -1024,7 +1173,7 @@ func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (To
 				stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration))
 			// Start file watcher for auto re-index.
 			if t.wm != nil {
-				t.wm.StartWatching(name, rootPath)
+				t.wm.StartWatching(name, fmt.Sprintf("%d", p.ID), rootPath)
 				sb.WriteString("File watcher active — changes will auto-reindex.\n")
 			}
 		}
