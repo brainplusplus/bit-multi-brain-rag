@@ -17,7 +17,7 @@ model embedding utama. Model berjalan via llama.cpp embedder (OpenAI-compatible
 `/v1/embeddings`). Untuk RAG interaktif (search real-time saat user menunggu),
 latency per request harus di bawah ~200ms.
 
-Pertanyaan muncul: **apakah GPU dibutuhan, atau CPU cukup?**
+Pertanyaan muncul: **apakah GPU dibutuhkan, atau CPU cukup?**
 
 ### 1.1 Test environment
 
@@ -33,9 +33,9 @@ Pertanyaan muncul: **apakah GPU dibutuhan, atau CPU cukup?**
 
 ### 1.2 Benchmark method
 
-Tool baru `cmd/embed-bench` (commit `66645af`) melakukan:
+Tool `cmd/embed-bench` (commit `66645af`) melakukan:
 1. Warm-up 2 panggilan (tidak dihitung).
-2. N iterasi timed call ke `POST /v1/embeddings`.
+2. 10 iterasi timed call ke `POST /v1/embeddings`.
 3. Hitung total / avg / p50 / p95 latency + tokens/sec.
 
 Dijalankan dari dalam `bit-rag-dashboard` container ke `bit-rag-embedder`
@@ -65,45 +65,98 @@ docker exec bit-rag-dashboard /tmp/embed-bench \
 auto-fallback ke CPU bila GPU tidak tersedia (lihat ADR-0001 §3.2 / implementasi
 `detectGPU()` di `pkg/dashboard/gpu.go`).
 
-### 2.1 Rationale: data benchmark
+### 2.1 Rationale: benchmark data
 
 Berikut hasil benchmark rata-rata atas 10 iterasi per skenario:
 
-| Scenario | Batch | CPU avg | GPU avg | CPU tok/s | GPU tok/s | **Speedup** |
-|----------|-------|---------|---------|-----------|-----------|-------------|
-| short (~12 tok) | 1 | 1528 ms | 29 ms | 9 | 480 | **52x** |
-| short (~12 tok) | 4 | 1533 ms | 8 ms | 146 | 26,967 | **191x** |
-| short (~12 tok) | 16 | 6146 ms | 26 ms | 583 | 136,754 | **236x** |
-| medium (~120 tok) | 1 | 1612 ms | 8 ms | 87 | 16,765 | **201x** |
-| medium (~120 tok) | 4 | 4125 ms | 33 ms | 543 | 66,833 | **125x** |
-| medium (~120 tok) | 16 | 12995 ms | 122 ms | 2,758 | 291,715 | **106x** |
+| Scenario              | Batch | CPU avg   | GPU avg  | CPU tok/s | GPU tok/s | **Speedup** |
+|-----------------------|-------|-----------|----------|-----------|-----------|-------------|
+| short (~12 tok)       | 1     | 1528 ms   | 29 ms    | 9         | 480       | **52x**     |
+| short (~12 tok)       | 4     | 1533 ms   | 8 ms     | 146       | 26,967    | **191x**    |
+| short (~12 tok)       | 16    | 6146 ms   | 26 ms    | 583       | 136,754   | **236x**    |
+| medium (~120 tok)     | 1     | 1612 ms   | 8 ms     | 87        | 16,765    | **201x**    |
+| medium (~120 tok)     | 4     | 4125 ms   | 33 ms    | 543       | 66,833    | **125x**    |
+| medium (~120 tok)     | 16    | 12995 ms  | 122 ms   | 2,758     | 291,715   | **106x**    |
 
 > Catatan: input ~600 tok tidak bisa diukur karena embedder melempar HTTP 500
 > ("physical batch size 512 exceeded"). Bisa di-raise via `--ubatch-size` bila
 > nanti dibutuhkan; di luar lingkup keputusan ini.
 
-#### 2.1.1 Key observations
+### 2.2 Grafik: latency comparison
+
+Skala logaritmik (ms). GPU di seluruh skenario 1-2 order of magnitude lebih cepat.
+
+**Latency per-request (avg ms, log scale):**
+
+```
+CPU ▏████████████████████████████████  short_b1  (1528 ms)
+GPU ▏█                                  short_b1  (29 ms)
+     ─────────────────────────────────────────────
+CPU ▏█████████████████████████████████ short_b4  (1533 ms)
+GPU ▏                                    short_b4  (8 ms)
+     ─────────────────────────────────────────────
+CPU ▏██████████████████████████████████████████ short_b16 (6146 ms)
+GPU ▏█                                  short_b16 (26 ms)
+     ─────────────────────────────────────────────
+CPU ▏█████████████████████████████████ med_b1   (1612 ms)
+GPU ▏█                                  med_b1   (8 ms)
+     ─────────────────────────────────────────────
+CPU ▏████████████████████████████████████████ med_b4   (4125 ms)
+GPU ▏█                                  med_b4   (33 ms)
+     ─────────────────────────────────────────────
+CPU ▏███████████████████████████████████████████████████ med_b16  (12995 ms)
+GPU ▏███                                med_b16  (122 ms)
+```
+
+### 2.3 Grafik: throughput comparison
+
+Tokens per detik (higher is better). GPU throughput puncak **291,715 tok/s**
+(medium batch 16) — 105x lipat CPU.
+
+```
+Throughput (tok/s, linear scale, max = 300000):
+
+short_b1   CPU  ▏           480
+           GPU  ▏                                                     9
+short_b4   CPU  ▏                                26967
+           GPU  ▏         146
+short_b16  CPU  ▏                                          136754
+           GPU  ▏       583
+med_b1     CPU  ▏                  16765
+           GPU  ▏         87
+med_b4     CPU  ▏                                          66833
+           GPU  ▏       543
+med_b16    CPU  ▏                                                    291715
+           GPU  ▏      2758
+                └──────────────────────────────────────────────────────────
+                0          50000       100000      150000     200000     300000
+```
+
+### 2.4 Key observations
 
 1. **GPU menang 52-236x lebih cepat** di semua skenario.
 2. **CPU tidak feasible untuk interactive RAG**: 1.5 detik per single short
    embedding, ~13 detik untuk 16 medium inputs paralel. User akan menunggu
-   terlalu lama.
+   terlalu lama untuk hasil search.
 3. **GPU latency sangat konsisten**: p95 dekat p50 (mis. 8ms vs 8ms untuk
-   medium b1; 122ms vs 120ms untuk medium b16). Predictable.
+   medium b1; 122ms vs 120ms untuk medium b16). Predictable, tidak ada tail
+   latency.
 4. **GPU throughput puncak 291,715 tok/s** (medium batch 16) — 105x lipat
-   CPU. Memungkinkan banyak concurrent search.
-5. **Batch besar (b16) menguntungkan GPU lebih dramatis** — CPU quadratic
-   (6146ms vs 1528ms saat batch 16x dibanding 1x), GPU hampir flat (26ms vs
-   29ms). Indikasi overhead GPU amortisasi sangat baik di batch processing.
+   CPU. Memungkinkan banyak concurrent search tanpa antrian.
+5. **Batch besar (b16) menguntungkan GPU lebih dramatis** — CPU naik ~4x saat
+   batch 16x dibanding 1x, GPU hampir flat. Indikasi overhead GPU amortisasi
+   sangat baik di batch processing.
 
-### 2.2 Implikasi UX
+### 2.5 Implikasi UX
 
 Latency budget interaktif RAG (~200ms dari query → hasil render):
-- **CPU**: 1.5-13 detik → tidak usable
-- **GPU**: 8-122ms → nyata real-time, sisa budget bisa untuk Qdrant search +
-  UI render
 
-### 2.3 Mekanisme default + auto-fallback
+| Mode | Single query | 16 parallel queries | Verdict |
+|------|--------------|---------------------|---------|
+| CPU  | 1.5–1.6 s    | 6–13 s              | Tidak usable untuk interaktif |
+| GPU  | 8–29 ms      | 26–122 ms           | Real-time, sisa budget untuk Qdrant + UI |
+
+### 2.6 Mekanisme default + auto-fallback
 
 Implementasi (`pkg/dashboard/gpu.go`):
 
@@ -120,13 +173,15 @@ canSwitch = Detected && ContainerToolkit
   menolak switch dan memberi command regen yang persis.
 
 Switch runtime via `POST /api/v1/gpu/switch {mode: gpu|cpu}`:
-- pre-flight CDI check
-- pull image (skip jika lokal)
-- stop + remove old container
-- start new container dengan CDI device (`nvidia.com/gpu=all`) atau legacy
-  DeviceRequests
-- health probe (auto-rollback bila gagal)
-- persist mode di SQLite
+
+```
+pre-flight CDI check
+    → pull image (skip jika lokal)
+    → stop + remove old container
+    → start new container dengan CDI device (nvidia.com/gpu=all) atau legacy DeviceRequests
+    → health probe (auto-rollback bila gagal)
+    → persist mode di SQLite
+```
 
 ---
 
@@ -171,6 +226,7 @@ Switch runtime via `POST /api/v1/gpu/switch {mode: gpu|cpu}`:
 
 Pakai model embedding yang lebih ringan (mis. MiniLM-L6 Q4 ~ 23 MB) supaya CPU
 cukup. **Ditolak** karena:
+
 - Recall/precision turun signifikan (lihat ADR-0001 benchmark dataset).
 - voyage-4-nano dipilih just precisely karena kualitasnya; mengorbankan kualitas
   untuk speed bukan trade-off yang diinginkan.
@@ -179,6 +235,7 @@ cukup. **Ditolak** karena:
 ### 4.2 External API (Voyage AI, OpenAI) instead of local GPU
 
 **Pertimbangkan sebagai fallback**, bukan default:
+
 - Latency network ~100-300ms (sudah mendekati GPU local) tapi dengan biaya
   per-request + ketergantungan internet + privacy data.
 - OK untuk backup bila GPU down, tapi tidak ideal untuk primary karena cost
@@ -188,6 +245,7 @@ cukup. **Ditolak** karena:
 ### 4.3 AMD ROCm atau Intel oneAPI
 
 **Ditolak** untuk sekarang karena:
+
 - Dukungan llama.cpp untuk ROCm/oneAPI kurang matang dibanding CUDA.
 - Setup lebih rumit di WSL2.
 - Bisa dipertimbangkan lagi bila ada demand (vendor-neutral via CDI sebenarnya
@@ -206,3 +264,4 @@ cukup. **Ditolak** karena:
 - `pkg/dashboard/gpu.go` — detection + switch logic
 - `scripts/rancher-nvidia-install.sh` — idempotent installer
 - llama.cpp docs: https://github.com/ggml-org/llama.cpp
+- Raw benchmark JSON: `bench-gpu.json` (GPU mode), `bench-cpu.json` (CPU mode)
