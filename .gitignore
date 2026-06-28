@@ -43,3 +43,7 @@ go.work.sum
 
 zvec_c_api.dll
 lib/
+
+data/zvec/
+data/dashboard-local.db
+data/dashboard-local.log

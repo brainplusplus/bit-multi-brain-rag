@@ -50,14 +50,16 @@ func (z *ZvecClient) getOrCreate(key CollectionKey) (*zvec.Collection, error) {
 	defer z.mu.Unlock()
 
 	name := key.String()
-	if c, ok := z.opened[name]; ok {
+	// zvec requires alphanumeric + underscore only. Replace invalid chars.
+	safeName := sanitizeZvecName(name)
+	if c, ok := z.opened[safeName]; ok {
 		return c, nil
 	}
 
-	collPath := filepath.Join(z.root, name)
+	collPath := filepath.Join(z.root, safeName)
 
 	// Build schema: PK (uint64 hash) + dense vector + payload fields.
-	schema := zvec.NewCollectionSchema(name)
+	schema := zvec.NewCollectionSchema(safeName)
 	schema.AddField(zvec.NewFieldSchema("embedding", zvec.DataTypeVectorFP32, false, uint32(z.dim)))
 	schema.AddField(zvec.NewFieldSchema("source_file", zvec.DataTypeString, true, 0))
 	schema.AddField(zvec.NewFieldSchema("language", zvec.DataTypeString, true, 0))
@@ -70,16 +72,17 @@ func (z *ZvecClient) getOrCreate(key CollectionKey) (*zvec.Collection, error) {
 	// Add FTS index on content field for BM25 full-text search.
 	schema.AddIndex("content", zvec.NewIndexParams(zvec.IndexTypeFTS))
 
-	collection, err := zvec.CreateAndOpen(collPath, schema, nil)
+	// Try to open existing collection first. If not found, create new.
+	collection, err := zvec.Open(collPath, nil)
 	if err != nil {
-		// Collection might already exist — try opening instead.
-		collection, err = zvec.Open(collPath, nil)
+		// Collection doesn't exist — create it.
+		collection, err = zvec.CreateAndOpen(collPath, schema, nil)
 		if err != nil {
-			return nil, fmt.Errorf("zvec: open collection %s: %w", name, err)
+			return nil, fmt.Errorf("zvec: create collection %s: %w", safeName, err)
 		}
 	}
 
-	z.opened[name] = collection
+	z.opened[safeName] = collection
 	return collection, nil
 }
 
@@ -94,7 +97,7 @@ func (z *ZvecClient) DeleteCollection(ctx context.Context, key CollectionKey) er
 	z.mu.Lock()
 	defer z.mu.Unlock()
 
-	name := key.String()
+	name := sanitizeZvecName(key.String())
 	if c, ok := z.opened[name]; ok {
 		c.Close()
 		delete(z.opened, name)
@@ -288,6 +291,14 @@ func hashDocID(id string) uint64 {
 		h *= prime
 	}
 	return h
+}
+
+// sanitizeZvecName replaces invalid chars for zvec collection names.
+// zvec requires alphanumeric + underscore only, and has length limits.
+// To be safe, use a short FNV hash of the original name.
+func sanitizeZvecName(name string) string {
+	h := hashDocID(name)
+	return fmt.Sprintf("c%d", h%100000) // short numeric name
 }
 
 // zvecDocsToResults converts zvec query results to rag.Result.
