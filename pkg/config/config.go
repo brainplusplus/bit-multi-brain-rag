@@ -36,6 +36,18 @@ type Config struct {
 	QdrantURL    string // Qdrant HTTP endpoint (e.g. http://localhost:6333)
 	QdrantAPIKey string // optional, empty if no auth
 
+	// --- zvec (embedded vector store, zero-setup mode) ---
+	// If ZvecPath is set, dashboard uses embedded zvec instead of Qdrant.
+	// No Docker needed for vector storage.
+	ZvecPath string // root directory for zvec data (e.g. "data/zvec")
+
+	// --- Embedder binary (zero-setup mode) ---
+	// If EmbedderBinary is set, dashboard starts llama-server as child process.
+	// No Docker needed for embedding.
+	EmbedderBinary string // path to llama-server binary
+	EmbedderModel  string // path to GGUF model file
+	EmbedderGPU    bool   // enable GPU layers
+
 	// --- SQLite (project metadata store) ---
 	DBPath string // path to SQLite database file (default "data/dashboard.db")
 
@@ -64,6 +76,10 @@ func Load() (*Config, error) {
 		EmbeddingPooling:   getEnv("EMBEDDING_POOLING", "mean"),
 		QdrantURL:          getEnv("QDRANT_URL", "http://localhost:6333"),
 		QdrantAPIKey:       getEnv("QDRANT_API_KEY", ""),
+		ZvecPath:           getEnv("ZVEC_PATH", ""),
+		EmbedderBinary:     getEnv("EMBEDDER_BINARY", ""),
+		EmbedderModel:      getEnv("EMBEDDER_MODEL", ""),
+		EmbedderGPU:        getEnvBool("EMBEDDER_GPU", false),
 		DBPath:             getEnv("DB_PATH", "data/dashboard.db"),
 		ActiveModel:        getEnv("ACTIVE_MODEL", "voyage_nano_1024"),
 		ActiveBackend:      getEnv("ACTIVE_BACKEND", "llama_q8"),

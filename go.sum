@@ -34,6 +34,8 @@ github.com/valyala/fasttemplate v1.2.2 h1:lxLXG0uE3Qnshl9QyaK6XJxMXlQZELvChBOCmQ
 github.com/valyala/fasttemplate v1.2.2/go.mod h1:KHLXt3tVN2HBp8eijSv/kGJopbvo7S+qRAEEKiv+SiQ=
 github.com/zeroshade/machine-id v0.0.0-20251223181436-930511047eef h1:1UOIz6tPkZ6ZBbtbk/ci1apJFAJ3EvQZNh1QVMENjuY=
 github.com/zeroshade/machine-id v0.0.0-20251223181436-930511047eef/go.mod h1:RHX47A/DYmoTfyT25mb6C+Eve7X5miOporc+RVUoRoY=
+github.com/zvec-ai/zvec-go v0.5.0 h1:mQWHZ9ZprkhFf+osBWab6A71tQfFp3Y9++RzjZ66h/8=
+github.com/zvec-ai/zvec-go v0.5.0/go.mod h1:Tbdj8JeNgMvFKx2plwN0vRS3v8Zr/y5EVxkAWIbJflQ=
 golang.org/x/crypto v0.53.0 h1:QZ4Muo8THX6CizN2vPPd5fBGHyogrdK9fG4wLPFUsto=
 golang.org/x/crypto v0.53.0/go.mod h1:DNLU434OwVakk9PzuwV8w62mAJpRJL3vsgcfp4Qnsio=
 golang.org/x/mod v0.36.0 h1:JJjpVx6myfUsUdAzZuOSTTmRE0PfZeNWzzvKrP7amb4=

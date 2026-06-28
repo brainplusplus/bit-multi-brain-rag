@@ -40,3 +40,6 @@ Thumbs.db
 # Go workspace (optional, local only)
 go.work
 go.work.sum
+
+zvec_c_api.dll
+lib/

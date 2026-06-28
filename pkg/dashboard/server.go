@@ -20,6 +20,7 @@ import (
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/auth"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/chunker"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/config"
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/embedder"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/indexer"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/jobs"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
@@ -95,17 +96,48 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	logger.Info("sqlite store opened", "path", cfg.DBPath)
 
-	// Best-effort Qdrant + embedder init. They may be offline in dev; the
-	// dashboard still serves project CRUD. Search will 503 if these are nil.
-	qc := rag.NewQdrantClient(cfg.QdrantURL, cfg.QdrantAPIKey, cfg.EmbeddingTimeoutS)
-	if err := qc.Ping(context.Background()); err != nil {
-		logger.Warn("qdrant unreachable, search disabled until available", "url", cfg.QdrantURL, "error", err)
+	// Best-effort vector store init. Two modes:
+	// - ZVEC_PATH set → embedded zvec (zero-setup, no Docker)
+	// - QDRANT_URL set → remote Qdrant (Docker/production)
+	var ragProvider rag.Provider
+	if cfg.ZvecPath != "" {
+		zc, err := rag.NewZvecClient(cfg.ZvecPath, cfg.EmbeddingDim)
+		if err != nil {
+			return nil, fmt.Errorf("zvec init: %w", err)
+		}
+		ragProvider = zc
+		logger.Info("zvec embedded storage initialized", "path", cfg.ZvecPath)
 	} else {
-		logger.Info("qdrant connected", "url", cfg.QdrantURL)
+		qc := rag.NewQdrantClient(cfg.QdrantURL, cfg.QdrantAPIKey, cfg.EmbeddingTimeoutS)
+		ragProvider = qc
+		if err := qc.Ping(context.Background()); err != nil {
+			logger.Warn("qdrant unreachable, search disabled until available", "url", cfg.QdrantURL, "error", err)
+		} else {
+			logger.Info("qdrant connected", "url", cfg.QdrantURL)
+		}
+	}
+
+	// Embedder: if EMBEDDER_BINARY is set, start local llama-server child process.
+	// Otherwise use the configured HTTP endpoint (Docker or remote).
+	embEndpoint := cfg.EmbeddingEndpoint
+	if cfg.EmbedderBinary != "" && cfg.EmbedderModel != "" {
+		em := embedder.New(embedder.Config{
+			BinaryPath: cfg.EmbedderBinary,
+			ModelPath:  cfg.EmbedderModel,
+			Port:       8080,
+			APIKey:     cfg.EmbeddingAPIKey,
+			GPU:        cfg.EmbedderGPU,
+		}, logger)
+		endpoint, err := em.Start(context.Background())
+		if err != nil {
+			logger.Error("embedder binary failed to start", "error", err)
+		} else {
+			embEndpoint = endpoint
+		}
 	}
 
 	emb := rag.NewLlamaEmbedder(rag.LlamaConfig{
-		Endpoint: cfg.EmbeddingEndpoint,
+		Endpoint: embEndpoint,
 		APIKey:   cfg.EmbeddingAPIKey,
 		Model:    cfg.EmbeddingModel,
 		Dim:      cfg.EmbeddingDim,
@@ -118,7 +150,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 
 	chk := chunker.New()
-	idx := indexer.New(chk, emb, qc, logger).WithStore(st)
+	idx := indexer.New(chk, emb, ragProvider, logger).WithStore(st)
 	// Apply per-model chunk size from the active registry entry.
 	if activeModel, err := st.GetActiveModel(context.Background()); err == nil {
 		idx.MaxTokensPerChunk = activeModel.EffectiveChunkTokens()
@@ -139,7 +171,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		cfg:     cfg,
 		logger:  logger,
 		store:   st,
-		rag:     qc,
+		rag:     ragProvider,
 		embed:   emb,
 		chunker: chk,
 		indexer: idx,
