@@ -566,6 +566,12 @@ body{font-family:var(--sans);background:var(--bg-base);color:var(--text-primary)
 .machine-badge{font-family:var(--mono);font-size:10.5px;color:var(--accent-primary);background:var(--bg-elevated);padding:2px 7px;border-radius:3px;border:1px solid var(--accent-primary);margin-left:6px;white-space:nowrap;cursor:help}
 .project-header-actions{display:flex;gap:8px;flex-shrink:0}
 .project-desc{color:var(--text-secondary);font-size:12px;margin-top:6px}
+.index-info-card{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:8px;padding:16px 20px;margin:8px 0}
+.index-info-card .info-icon{font-size:24px;color:var(--accent-primary);margin:0 0 8px 0}
+.index-info-card p{margin:4px 0;line-height:1.5}
+.index-info-card .muted{color:var(--text-secondary)}
+.index-info-card code{font-family:var(--mono);font-size:11.5px;background:var(--bg-raised);padding:2px 6px;border-radius:3px;border:1px solid var(--border-subtle);color:var(--accent-primary)}
+.index-info-card .small{font-size:11.5px}
 .project-search{padding:16px 28px 0}
 .search-results{margin-top:14px}
 .search-results:empty{display:none}

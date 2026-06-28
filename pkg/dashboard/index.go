@@ -203,19 +203,24 @@ func (s *Server) uiRunIndex(c echo.Context) error {
 	if project == "" {
 		return c.HTML(400, "<p class='error'>Project is required</p>")
 	}
-	rootPath, err := s.resolveRootPath(c, project, "")
+	// After the architecture refactor (ADR: MCP scans locally), the dashboard
+	// can no longer walk the filesystem. Re-indexing must be triggered via
+	// the MCP client (rag_index_project tool), which scans files locally and
+	// uploads chunks to this dashboard for embed + store.
+	p, err := s.resolveProject(c, project)
 	if err != nil {
 		return c.HTML(404, fmt.Sprintf("<p class='error'>%s</p>", template.HTMLEscapeString(err.Error())))
 	}
-	if s.indexer == nil || s.jobs == nil {
-		return c.HTML(503, "<p class='error'>Indexer unavailable (Qdrant/embedder offline).</p>")
-	}
-	pid := s.resolveProjectID(c, project)
-	job, err := s.jobs.Enqueue(project, rootPath, pid)
-	if err != nil && !errors.Is(err, jobs.ErrAlreadyRunning) {
-		return c.HTML(500, fmt.Sprintf("<p class='error'>%s</p>", template.HTMLEscapeString(err.Error())))
-	}
-	return c.HTML(202, s.renderJobStatus(job))
+	return c.HTML(200, fmt.Sprintf(
+		"<div class='index-info-card'>"+
+			"<p class='info-icon'>&#9432;</p>"+
+			"<p><strong>Re-indexing is done via the MCP client.</strong></p>"+
+			"<p class='muted'>The dashboard no longer scans the filesystem directly. "+
+			"Use your AI agent to call <code>rag_index_project</code> with "+
+			"<code>project_id=%d</code>.</p>"+
+			"<p class='muted small'>The agent will scan <code>%s</code> locally, "+
+			"chunk the files, and upload them here for embedding + storage.</p>"+
+			"</div>", p.ID, template.HTMLEscapeString(p.RootPath)))
 }
 
 // uiJobStatus is the HTMX polling endpoint. Returns the latest status for the
