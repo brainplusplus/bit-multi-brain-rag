@@ -190,6 +190,20 @@ func (q *QdrantClient) DeletePoints(ctx context.Context, key CollectionKey, poin
 	return err
 }
 
+// DeleteBySourceFile removes all points where payload source_file matches.
+// Used by delta indexing when a file is deleted or renamed.
+func (q *QdrantClient) DeleteBySourceFile(ctx context.Context, key CollectionKey, sourceFile string) error {
+	body := map[string]any{
+		"filter": map[string]any{
+			"must": []map[string]any{
+				{"key": "source_file", "match": map[string]any{"value": sourceFile}},
+			},
+		},
+	}
+	_, _, err := q.do(ctx, "POST", "/collections/"+key.String()+"/points/delete?wait=true", body)
+	return err
+}
+
 // scrollResult maps the Qdrant scroll (list) response.
 type scrollResult struct {
 	Result struct {

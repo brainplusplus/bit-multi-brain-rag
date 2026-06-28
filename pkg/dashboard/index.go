@@ -93,12 +93,13 @@ func (s *Server) indexCancelAPI(c echo.Context) error {
 // The MCP client sends pre-chunked documents (already read + chunked locally).
 // The dashboard only does embed + store — no filesystem access needed.
 type indexUploadReq struct {
-	Project string `json:"project"` // project name
-	Docs    []struct {
+	Project       string   `json:"project"`        // project name
+	Docs          []struct {
 		ID      string            `json:"id"`
 		Content string            `json:"content"`
 		Meta    map[string]string `json:"meta"`
 	} `json:"docs"`
+	DeletedFiles []string `json:"deleted_files"`   // relative paths to delete from Qdrant
 }
 
 // indexUploadAPI accepts pre-chunked documents from the MCP client,
@@ -132,6 +133,20 @@ func (s *Server) indexUploadAPI(c echo.Context) error {
 	key := s.collectionKeyFor(req.Project)
 	if err := s.rag.CreateCollection(ctx, key); err != nil {
 		return c.JSON(500, map[string]string{"error": fmt.Sprintf("create collection: %v", err)})
+	}
+
+	// Delete stale points for deleted files (delta indexing).
+	deletedCount := 0
+	if len(req.DeletedFiles) > 0 {
+		if qc, ok := s.rag.(*rag.QdrantClient); ok {
+			for _, relPath := range req.DeletedFiles {
+				if err := qc.DeleteBySourceFile(ctx, key, relPath); err != nil {
+					s.logger.Warn("delete stale points failed", "file", relPath, "error", err)
+				} else {
+					deletedCount++
+				}
+			}
+		}
 	}
 
 	// Convert to rag.Documents.
@@ -192,6 +207,7 @@ func (s *Server) indexUploadAPI(c echo.Context) error {
 		"project":  req.Project,
 		"embedded": len(vecs),
 		"indexed":  len(docs),
+		"deleted":  deletedCount,
 	})
 }
 

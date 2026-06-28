@@ -273,17 +273,44 @@ type UploadResult struct {
 	Project  string `json:"project"`
 	Embedded int    `json:"embedded"`
 	Indexed  int    `json:"indexed"`
+	Deleted  int    `json:"deleted"`
 }
 
 // UploadAndIndex sends pre-chunked documents to the dashboard for embedding
-// and storage. This is the "remote index" path: the MCP client reads +
-// chunks files locally, then sends chunks here. No filesystem access
-// needed on the dashboard side (no mounting).
+// and storage. deletedFiles is an optional list of relative paths whose
+// points should be removed from Qdrant (for deleted/renamed source files).
 //
 // Docs are sent in batches to avoid HTTP body size limits.
-func (c *Client) UploadAndIndex(ctx context.Context, project string, docs []UploadDoc) (*UploadResult, error) {
-	if len(docs) == 0 {
+func (c *Client) UploadAndIndex(ctx context.Context, project string, docs []UploadDoc, deletedFiles []string) (*UploadResult, error) {
+	if len(docs) == 0 && len(deletedFiles) == 0 {
 		return &UploadResult{Status: "noop"}, nil
+	}
+
+	// Send deleted files in the first batch (or alone if no docs).
+	if len(deletedFiles) > 0 {
+		body, _ := json.Marshal(map[string]any{
+			"project":       project,
+			"docs":          []UploadDoc{},
+			"deleted_files": deletedFiles,
+		})
+		url := c.baseURL + "/api/v1/index/upload"
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		c.setMachineHeaders(req)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("ragclient: delete upload: %w", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("ragclient: delete %d: %s", resp.StatusCode, truncate(string(raw), 300))
+		}
+	}
+
+	if len(docs) == 0 {
+		return &UploadResult{Status: "deleted", Project: project, Deleted: len(deletedFiles)}, nil
 	}
 
 	// Batch: max 64 docs per request to keep body size manageable.

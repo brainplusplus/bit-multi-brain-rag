@@ -637,7 +637,7 @@ func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 			}
 			batch = append(batch, doc)
 			if len(batch) >= batchSize {
-				result, err := client.UploadAndIndex(ctx, project, batch)
+				result, err := client.UploadAndIndex(ctx, project, batch, nil)
 				if err != nil {
 					return err
 				}
@@ -654,7 +654,7 @@ func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 
 	// Flush remaining.
 	if len(batch) > 0 {
-		result, err := client.UploadAndIndex(ctx, project, batch)
+		result, err := client.UploadAndIndex(ctx, project, batch, nil)
 		if err != nil {
 			return stats, fmt.Errorf("upload final batch: %w", err)
 		}
@@ -684,12 +684,17 @@ func deltaIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 
 	const batchSize = 64
 	var batch []ragclient.UploadDoc
+	var deletedRelPaths []string
 
 	for _, absPath := range changedFiles {
-		// Skip deleted files (fsnotify Remove/Rename events).
+		relPath, _ := filepath.Rel(rootPath, absPath)
+
+		// Deleted/renamed files: collect for Qdrant point deletion.
 		if _, err := os.Stat(absPath); err != nil {
+			deletedRelPaths = append(deletedRelPaths, relPath)
 			continue
 		}
+
 		data, err := os.ReadFile(absPath)
 		if err != nil {
 			slog.Warn("delta: read failed", "file", absPath, "error", err)
@@ -701,7 +706,6 @@ func deltaIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 
 		stats.FilesScanned++
 
-		relPath, _ := filepath.Rel(rootPath, absPath)
 		chunks, err := ch.ChunkFile(ctx, data, relPath)
 		if err != nil {
 			slog.Warn("delta: chunk failed", "file", relPath, "error", err)
@@ -723,19 +727,21 @@ func deltaIndex(ctx context.Context, client *ragclient.Client, project, rootPath
 				},
 			})
 			if len(batch) >= batchSize {
-				result, err := client.UploadAndIndex(ctx, project, batch)
+				result, err := client.UploadAndIndex(ctx, project, batch, deletedRelPaths)
 				if err != nil {
 					return stats, fmt.Errorf("delta upload: %w", err)
 				}
 				stats.Embedded += result.Embedded
 				stats.Stored += result.Indexed
 				batch = batch[:0]
+				deletedRelPaths = nil // sent with first batch
 			}
 		}
 	}
 
-	if len(batch) > 0 {
-		result, err := client.UploadAndIndex(ctx, project, batch)
+	// Upload remaining docs + deleted files.
+	if len(batch) > 0 || len(deletedRelPaths) > 0 {
+		result, err := client.UploadAndIndex(ctx, project, batch, deletedRelPaths)
 		if err != nil {
 			return stats, fmt.Errorf("delta upload final: %w", err)
 		}
