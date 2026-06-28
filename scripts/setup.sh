@@ -162,13 +162,13 @@ else
     [[ "$status" == "healthy" ]] && ok "Qdrant is healthy" || warn "Qdrant not healthy yet"
 
     # Embedder + dashboard
-    info "Removing old containers if any..."
-    for c in bit-rag-dashboard bit-rag-embedder; do
-        docker stop $c 2>/dev/null || true
-        docker rm $c 2>/dev/null || true
-    done
+    # Strategy: only recreate containers that don't exist or aren't running.
+    # If embedder is already running (e.g. user switched to GPU mode via
+    # dashboard UI), keep it — don't destroy GPU config.
+    EMB_RUNNING=$(docker ps --filter name=bit-rag-embedder --format '{{.Names}}' 2>/dev/null | grep -c '^bit-rag-embedder$' || true)
+    DASH_RUNNING=$(docker ps --filter name=bit-rag-dashboard --format '{{.Names}}' 2>/dev/null | grep -c '^bit-rag-dashboard$' || true)
 
-    # Build images
+    # Build dashboard image (always, to pick up code changes)
     info "Building dashboard image..."
     docker compose build dashboard >/dev/null 2>&1 || {
         err "Dashboard image build failed"
@@ -177,20 +177,31 @@ else
     }
     ok "Dashboard image built"
 
-    info "Building embedder image..."
-    docker compose build embedder >/dev/null 2>&1 || {
-        err "Embedder image build failed"
-        exit 1
-    }
-    ok "Embedder image built"
+    # Embedder: only build + start if not already running
+    if [[ "$EMB_RUNNING" -eq 0 ]]; then
+        # Remove stale container if exists (stopped/crashed)
+        docker rm -f bit-rag-embedder 2>/dev/null || true
 
-    # Start
-    docker compose up -d --no-deps embedder >/dev/null 2>&1 || {
-        err "Embedder failed to start"
-        exit 1
-    }
-    ok "Embedder started"
+        info "Building embedder image..."
+        docker compose build embedder >/dev/null 2>&1 || {
+            err "Embedder image build failed"
+            exit 1
+        }
+        ok "Embedder image built"
 
+        docker compose up -d --no-deps embedder >/dev/null 2>&1 || {
+            err "Embedder failed to start"
+            exit 1
+        }
+        ok "Embedder started"
+    else
+        ok "Embedder already running (keeping existing config)"
+    fi
+
+    # Dashboard: always recreate to pick up code changes + new mounts
+    if [[ "$DASH_RUNNING" -gt 0 ]]; then
+        docker rm -f bit-rag-dashboard >/dev/null 2>&1 || true
+    fi
     docker compose up -d --no-deps dashboard >/dev/null 2>&1 || {
         err "Dashboard failed to start"
         exit 1

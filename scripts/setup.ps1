@@ -184,22 +184,17 @@ if ($SkipDocker) {
         Write-Warn "Qdrant not healthy yet (continuing anyway)"
     }
 
-    # Deploy embedder + dashboard
-    # These might already be running from manual deploys. Handle gracefully.
+    # Deploy embedder + dashboard.
+    # Strategy: only recreate containers that don't exist or aren't running.
+    # If embedder is already running (e.g. user switched to GPU mode via
+    # dashboard UI), keep it — don't destroy GPU config.
     Write-Info "Starting embedder + dashboard..."
 
-    # Remove old containers if running (to pick up new image/env)
-    foreach ($c in @("bit-rag-dashboard", "bit-rag-embedder")) {
-        $existing = docker ps -a --filter name=$c --format "{{.Names}}" 2>$null
-        if ($existing -match $c) {
-            $ErrorActionPreference = "SilentlyContinue"
-            docker stop $c 2>$null
-            docker rm $c 2>$null
-            $ErrorActionPreference = "Stop"
-        }
-    }
+    # Check what's already running
+    $embRunning = docker ps --filter name=bit-rag-embedder --format "{{.Names}}" 2>$null
+    $dashRunning = docker ps --filter name=bit-rag-dashboard --format "{{.Names}}" 2>$null
 
-    # Build dashboard image
+    # Build images (always, to pick up code changes)
     Write-Info "Building dashboard image..."
     $ErrorActionPreference = "SilentlyContinue"
     docker compose build dashboard 2>$null
@@ -212,9 +207,16 @@ if ($SkipDocker) {
     }
     Write-OK "Dashboard image built"
 
-    # Start embedder (run directly to avoid compose depends_on conflicts)
-    $embRunning = docker ps --filter name=bit-rag-embedder --format "{{.Names}}" 2>$null
+    # Embedder: only build + start if not already running
     if ($embRunning -notmatch "bit-rag-embedder") {
+        # Remove stale container if exists (stopped/crashed)
+        $embStale = docker ps -a --filter name=bit-rag-embedder --format "{{.Names}}" 2>$null
+        if ($embStale -match "bit-rag-embedder") {
+            $ErrorActionPreference = "SilentlyContinue"
+            docker rm -f bit-rag-embedder 2>$null
+            $ErrorActionPreference = "Stop"
+        }
+
         Write-Info "Building embedder image..."
         $ErrorActionPreference = "SilentlyContinue"
         docker compose build embedder 2>$null
@@ -225,19 +227,26 @@ if ($SkipDocker) {
             exit 1
         }
         Write-OK "Embedder image built"
+
+        $ErrorActionPreference = "SilentlyContinue"
+        docker compose up -d --no-deps embedder 2>$null
+        $ErrorActionPreference = "Stop"
+        $embCheck = docker ps --filter name=bit-rag-embedder --format "{{.Names}}" 2>$null
+        if ($embCheck -notmatch "bit-rag-embedder") {
+            Write-Err "Embedder failed to start"
+            exit 1
+        }
+        Write-OK "Embedder started"
+    } else {
+        Write-OK "Embedder already running (keeping existing config)"
     }
 
-    # Use docker compose up but only for embedder first, then dashboard
-    $ErrorActionPreference = "SilentlyContinue"
-    docker compose up -d --no-deps embedder 2>$null
-    $ErrorActionPreference = "Stop"
-    $embCheck = docker ps --filter name=bit-rag-embedder --format "{{.Names}}" 2>$null
-    if ($embCheck -notmatch "bit-rag-embedder") {
-        Write-Err "Embedder failed to start"
-        exit 1
+    # Dashboard: always recreate to pick up code changes + new mounts
+    if ($dashRunning -match "bit-rag-dashboard") {
+        $ErrorActionPreference = "SilentlyContinue"
+        docker rm -f bit-rag-dashboard 2>$null
+        $ErrorActionPreference = "Stop"
     }
-    Write-OK "Embedder started"
-
     $ErrorActionPreference = "SilentlyContinue"
     docker compose up -d --no-deps dashboard 2>$null
     $dashExit = $LASTEXITCODE

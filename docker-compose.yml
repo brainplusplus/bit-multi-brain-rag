@@ -80,6 +80,11 @@ services:
     volumes:
       # Persist SQLite + project metadata across container restart.
       - bit-rag-data:/app/data
+      # Docker socket: dashboard queries docker API for GPU/CDI detection +
+      # manages embedder container lifecycle (switch CPU/GPU mode).
+      # This is the ONLY host mount needed — GPU detection works via
+      # docker info API (Probe 3 + 4), not /proc/driver/nvidia.
+      - /var/run/docker.sock:/var/run/docker.sock
 
     networks:
       - bit-rag-net
