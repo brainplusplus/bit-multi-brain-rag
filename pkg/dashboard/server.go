@@ -143,6 +143,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	api.DELETE("/projects/:id", s.deleteProject)
 	api.POST("/search", s.search)               // POST /api/v1/search
 	api.POST("/index", s.indexAPI)              // POST /api/v1/index — enqueue (returns 202)
+	api.POST("/index/upload", s.indexUploadAPI) // POST /api/v1/index/upload — accept pre-chunked docs (MCP upload)
 	api.GET("/index/status", s.indexStatusAPI)  // GET  /api/v1/index/status?project=X
 	api.POST("/index/cancel", s.indexCancelAPI) // POST /api/v1/index/cancel
 	api.GET("/models", s.apiListModels)              // GET  /api/v1/models

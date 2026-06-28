@@ -10,6 +10,7 @@ import (
 
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/indexer"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/jobs"
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/store"
 )
 
@@ -86,6 +87,106 @@ func (s *Server) indexCancelAPI(c echo.Context) error {
 		return c.JSON(409, map[string]string{"error": "no active job for project"})
 	}
 	return c.JSON(200, map[string]string{"status": "cancel signalled"})
+}
+
+// indexUploadReq is the body for POST /api/v1/index/upload.
+// The MCP client sends pre-chunked documents (already read + chunked locally).
+// The dashboard only does embed + store — no filesystem access needed.
+type indexUploadReq struct {
+	Project string `json:"project"` // project name
+	Docs    []struct {
+		ID      string            `json:"id"`
+		Content string            `json:"content"`
+		Meta    map[string]string `json:"meta"`
+	} `json:"docs"`
+}
+
+// indexUploadAPI accepts pre-chunked documents from the MCP client,
+// embeds them, and stores in Qdrant. This is the "remote index" path:
+// MCP reads + chunks locally, sends chunks here for embed + store.
+// No filesystem access needed on the dashboard side (no mounting).
+func (s *Server) indexUploadAPI(c echo.Context) error {
+	var req indexUploadReq
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(400, map[string]string{"error": "invalid request body"})
+	}
+	if req.Project == "" {
+		return c.JSON(400, map[string]string{"error": "project is required"})
+	}
+	if len(req.Docs) == 0 {
+		return c.JSON(400, map[string]string{"error": "docs is empty"})
+	}
+	if s.indexer == nil || s.embed == nil {
+		return c.JSON(503, map[string]string{"error": "indexer/embedder unavailable"})
+	}
+
+	ctx := c.Request().Context()
+
+	// Build collection key from active model config.
+	key := s.collectionKeyFor(req.Project)
+	if err := s.rag.CreateCollection(ctx, key); err != nil {
+		return c.JSON(500, map[string]string{"error": fmt.Sprintf("create collection: %v", err)})
+	}
+
+	// Convert to rag.Documents.
+	docs := make([]rag.Document, len(req.Docs))
+	for i, d := range req.Docs {
+		docs[i] = rag.Document{
+			ID:      d.ID,
+			Content: d.Content,
+			Meta:    d.Meta,
+		}
+	}
+
+	// Split oversized (in case MCP sent chunks that exceed embedder limit).
+	pid := s.resolveProjectID(c, req.Project)
+	docs = indexer.SplitOversizedPublic(req.Project, docs, s.indexer.MaxTokensPerChunk)
+
+	// Embed batch.
+	texts := make([]string, len(docs))
+	for i, d := range docs {
+		texts[i] = d.Content
+	}
+	vecs, err := s.embed.Embed(ctx, texts)
+	if err != nil {
+		return c.JSON(500, map[string]string{"error": fmt.Sprintf("embed: %v", err)})
+	}
+
+	// Store (hybrid or dense-only).
+	if s.indexer.HybridEnabled {
+		if qc, ok := s.rag.(*rag.QdrantClient); ok {
+			sparseVecs := make([]*rag.SparseVector, len(docs))
+			for i, d := range docs {
+				sym := d.Meta["symbol"]
+				nm := d.Meta["name"]
+				f := d.Meta["source_file"]
+				sparseVecs[i] = s.bm25.BuildDocSparse(sym, nm, f, d.Content)
+			}
+			if err := qc.IndexWithSparse(ctx, key, docs, vecs, sparseVecs); err != nil {
+				// Fallback to dense-only.
+				if err := s.rag.Index(ctx, key, docs, vecs); err != nil {
+					return c.JSON(500, map[string]string{"error": fmt.Sprintf("index: %v", err)})
+				}
+			}
+		} else {
+			if err := s.rag.Index(ctx, key, docs, vecs); err != nil {
+				return c.JSON(500, map[string]string{"error": fmt.Sprintf("index: %v", err)})
+			}
+		}
+	} else {
+		if err := s.rag.Index(ctx, key, docs, vecs); err != nil {
+			return c.JSON(500, map[string]string{"error": fmt.Sprintf("index: %v", err)})
+		}
+	}
+
+	_ = pid // fingerprints tracked by MCP client (local)
+
+	return c.JSON(200, map[string]any{
+		"status":   "indexed",
+		"project":  req.Project,
+		"embedded": len(vecs),
+		"indexed":  len(docs),
+	})
 }
 
 // uiRunIndex enqueues an indexing job via the HTMX UI and returns the live
@@ -173,7 +274,7 @@ func (s *Server) resolveProject(c echo.Context, project string) (*store.Project,
 	}
 	for _, p := range projects {
 		if p.Name == project {
-			return p, nil
+			return &p, nil
 		}
 	}
 	return nil, fmt.Errorf("project %q not found", project)

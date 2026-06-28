@@ -231,6 +231,79 @@ func (c *Client) IndexProject(ctx context.Context, project string) (string, erro
 	return out.ID, nil
 }
 
+// UploadDoc is a single pre-chunked document for the upload index path.
+type UploadDoc struct {
+	ID      string            `json:"id"`
+	Content string            `json:"content"`
+	Meta    map[string]string `json:"meta"`
+}
+
+// UploadResult is the response from POST /api/v1/index/upload.
+type UploadResult struct {
+	Status   string `json:"status"`
+	Project  string `json:"project"`
+	Embedded int    `json:"embedded"`
+	Indexed  int    `json:"indexed"`
+}
+
+// UploadAndIndex sends pre-chunked documents to the dashboard for embedding
+// and storage. This is the "remote index" path: the MCP client reads +
+// chunks files locally, then sends chunks here. No filesystem access
+// needed on the dashboard side (no mounting).
+//
+// Docs are sent in batches to avoid HTTP body size limits.
+func (c *Client) UploadAndIndex(ctx context.Context, project string, docs []UploadDoc) (*UploadResult, error) {
+	if len(docs) == 0 {
+		return &UploadResult{Status: "noop"}, nil
+	}
+
+	// Batch: max 64 docs per request to keep body size manageable.
+	const batchSize = 64
+	var totalEmbedded, totalIndexed int
+	var lastResult UploadResult
+
+	for start := 0; start < len(docs); start += batchSize {
+		end := start + batchSize
+		if end > len(docs) {
+			end = len(docs)
+		}
+		batch := docs[start:end]
+
+		body, _ := json.Marshal(map[string]any{
+			"project": project,
+			"docs":    batch,
+		})
+		url := c.baseURL + "/api/v1/index/upload"
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("ragclient: new request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("ragclient: upload: %w", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("ragclient: upload %d: %s", resp.StatusCode, truncate(string(raw), 300))
+		}
+		var r UploadResult
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return nil, fmt.Errorf("ragclient: decode upload: %w", err)
+		}
+		totalEmbedded += r.Embedded
+		totalIndexed += r.Indexed
+		lastResult = r
+	}
+
+	lastResult.Embedded = totalEmbedded
+	lastResult.Indexed = totalIndexed
+	return &lastResult, nil
+}
+
 // IndexStatus holds a snapshot of an indexing job's progress.
 type IndexStatus struct {
 	Status      string   `json:"status"`

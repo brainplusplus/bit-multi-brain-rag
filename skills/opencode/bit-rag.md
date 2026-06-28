@@ -18,7 +18,7 @@ semantic code search. It uses hybrid retrieval: dense voyage-4-nano embeddings
 | `rag_project_status` | Check if project is registered + indexed. Use `project_id`. |
 | `rag_search_code` | Semantic search. Returns ranked chunks with scores. Use `project_id`. |
 | `rag_retrieve_context` | Same as search, but formatted as paste-ready context. Use `project_id`. |
-| `rag_index_project` | Trigger background re-index after code changes. Use `project_id`. |
+| `rag_index_project` | Re-index by scanning files locally + uploading to dashboard. Use `project_id`. |
 | `rag_list_projects` | List all projects with ID + name + root_path. |
 
 ## Project identity: `project_id` is the key
@@ -78,7 +78,7 @@ bit-rag uses **hybrid search** — both semantic and exact-identifier queries wo
 
 ```json
 // Onboard (call first, idempotent)
-{"name": "rag_create_project", "arguments": {"root_path": "/code"}}
+{"name": "rag_create_project", "arguments": {"root_path": "/home/user/my-app"}}
 
 // Search
 {"name": "rag_search_code", "arguments": {"project_id": 1, "query": "JWT validation middleware", "limit": 5}}
@@ -95,10 +95,11 @@ bit-rag uses **hybrid search** — both semantic and exact-identifier queries wo
 
 ## Privacy
 
-Only `{project_id/project, query, limit}` leaves the machine per search. Source code
-is sent only during indexing (and only if the dashboard is remote). The
-index lives server-side in Qdrant. Treat queries as sensitive when working
-on confidential codebases.
+Only `{project_id/project, query, limit}` leaves the machine per search.
+During indexing, source code chunks are sent to the dashboard for embedding +
+storage. If the dashboard is remote, these chunks traverse the network.
+The index lives server-side in Qdrant. Treat queries and indexed content as
+sensitive when working on confidential codebases.
 
 ## Connection issues
 

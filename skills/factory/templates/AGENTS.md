@@ -6,12 +6,12 @@ This project uses `bit-rag` MCP server for semantic code search.
 
 When you start working on this project, **before accepting search queries**:
 
-1. Call `rag_create_project` with `root_path` = the source code path as seen
-   from the dashboard server.
+1. Call `rag_create_project` with `root_path` = the local source code path
+   (where the MCP client runs — NOT the dashboard server path).
    - If already registered → returns existing `project_id`
-   - If new → creates project + triggers indexing, returns `project_id`
+   - If new → creates project, scans files locally, uploads chunks for embedding, returns `project_id`
 2. Save the `project_id` for all subsequent calls.
-3. If indexing was triggered, wait ~30s for it to complete.
+3. Indexing runs during the call (files scanned locally + uploaded). No waiting needed.
 
 **Do not ask the user to manually create or look up IDs.** `rag_create_project`
 is idempotent by root_path.
@@ -31,7 +31,7 @@ The `project` (name) parameter is a fallback only.
 
 1. Summarize what you changed and why.
 2. Call `rag_index_project` with `project_id` to refresh the index.
-3. Wait ~30s for background indexing, then new search results will reflect your changes.
+3. Indexing scans files locally + uploads — results available immediately.
 
 ## When to search (retrieve)
 

@@ -421,13 +421,15 @@ func (ix *Indexer) IndexProjectWithProgress(ctx context.Context, project, rootPa
 }
 
 // pointID generates a deterministic, collision-free point ID as a UUID v5.
-// Qdrant only accepts unsigned ints or RFC-4122 UUIDs as point IDs; hex
-// digests without dashes (e.g. raw SHA fragments) are rejected with 400.
-// UUID v5 over (project,file,line) is deterministic, so re-indexing the
-// same chunk overwrites in place (idempotent).
 func pointID(project, file string, line int) string {
 	return uuid.NewSHA1(uuid.NameSpaceURL,
 		[]byte(fmt.Sprintf("%s:%s:%d", project, file, line))).String()
+}
+
+// SplitOversizedPublic is the exported wrapper around splitOversized for use
+// by the dashboard's upload handler (which receives pre-chunked docs from MCP).
+func SplitOversizedPublic(project string, docs []rag.Document, maxTokens int) []rag.Document {
+	return splitOversized(project, docs, maxTokens)
 }
 
 // splitOversized splits any document whose content exceeds the embedder's

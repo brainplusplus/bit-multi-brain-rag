@@ -81,13 +81,13 @@ is safe and returns the same `project_id` if already registered.
 
 ### root_path note
 
-`root_path` must be the path **as seen from the dashboard server**, not from
-the MCP client. For local dev (dashboard in Docker), this is typically the
-container mount path (e.g. `/code` if you mounted `-v /host/path:/code`).
-For remote deploy, it's the server filesystem path.
+`root_path` is the **LOCAL filesystem path** where the MCP client runs (i.e.
+where your code lives on your machine). The MCP client scans files locally,
+chunks them with tree-sitter, and uploads pre-chunked documents to the
+dashboard for embedding + storage. **No mounting or volume mapping needed.**
 
-If unsure, ask the user: "What is the source code path as seen from the
-dashboard server?"
+If unsure, ask the user: "What is the absolute path to this project on your
+machine?"
 
 ## Workflow after onboard
 
@@ -100,7 +100,7 @@ dashboard server?"
 ### After coding (refresh index)
 
 1. Call `rag_index_project` with `project_id`.
-2. Wait ~30s (background job), then search will reflect new content.
+2. Files are scanned locally + uploaded — results available immediately.
 
 ## Query writing rules
 
@@ -359,10 +359,11 @@ After configuring, restart the coding tool and verify the MCP connection:
 
 ## Privacy
 
-Only `{project_id/project, query, limit}` leaves the user's machine per search. Source
-code is sent only during indexing (and only if the dashboard is remote).
-The index lives server-side in Qdrant. Treat queries as sensitive when
-working on confidential codebases.
+Only `{project_id/project, query, limit}` leaves the user's machine per search.
+During indexing, source code chunks are sent to the dashboard for embedding +
+storage. If the dashboard is remote (Easypanel/VPS), these chunks traverse the
+network. The index lives server-side in Qdrant. Treat queries and indexed
+content as sensitive when working on confidential codebases.
 
 ## Reference
 

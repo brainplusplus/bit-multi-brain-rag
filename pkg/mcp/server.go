@@ -24,13 +24,14 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/chunker"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/indexer"
-	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
-	"github.com/brainplusplus/bit-multi-brain-rag/pkg/ragclient"
-)
-
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/ragclient"
 )
@@ -394,9 +395,11 @@ func formatContext(query, project string, results []rag.Result) string {
 
 // --- IndexProjectTool ---
 
-// IndexProjectTool triggers a background indexing job for a project via the
-// dashboard API. Returns job ID + initial status. Polling is the agent's
-// responsibility (use rag_list_projects to check or just wait ~30s).
+// IndexProjectTool walks the LOCAL project folder, chunks files with
+// tree-sitter, and uploads pre-chunked docs to the dashboard for embedding
+// + storage. This is the "remote index" path: NO mounting needed on the
+// dashboard side. The MCP client (running locally) reads files, the
+// dashboard only embeds + stores.
 type IndexProjectTool struct {
 	client *ragclient.Client
 }
@@ -404,9 +407,8 @@ type IndexProjectTool struct {
 func (t *IndexProjectTool) Name() string { return "rag_index_project" }
 
 func (t *IndexProjectTool) Description() string {
-	return "Trigger background indexing for a project (re-index all source files). " +
-		"Returns immediately with job status. Use after significant code changes " +
-		"to keep the RAG index fresh."
+	return "Index a project by scanning files locally, chunking them, and uploading to the dashboard for embedding + storage. " +
+		"Returns indexing statistics. Use after significant code changes to keep the RAG index fresh."
 }
 
 func (t *IndexProjectTool) InputSchema() map[string]any {
@@ -415,11 +417,15 @@ func (t *IndexProjectTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"project_id": map[string]any{
 				"type":        "integer",
-				"description": "Numeric project ID (from rag_list_projects). Preferred.",
+				"description": "Numeric project ID (from rag_create_project or rag_list_projects). Preferred.",
 			},
 			"project": map[string]any{
 				"type":        "string",
 				"description": "Project name (fallback if project_id not known).",
+			},
+			"root_path": map[string]any{
+				"type":        "string",
+				"description": "Local filesystem path to the project root (if different from registered path).",
 			},
 		},
 	}
@@ -430,20 +436,151 @@ func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (Too
 	if projectID == 0 && projectName == "" {
 		return ToolResult{}, fmt.Errorf("project_id or project is required")
 	}
+
+	// Resolve project info from dashboard.
 	name, err := t.client.ResolveProjectIdentifier(ctx, projectID, projectName)
 	if err != nil {
 		return ToolResult{}, err
 	}
-	jobID, err := t.client.IndexProject(ctx, name)
+	proj, err := t.client.GetProject(ctx, name)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("get project: %w", err)
+	}
+
+	rootPath := proj.RootPath
+	if override, ok := args["root_path"].(string); ok && override != "" {
+		rootPath = override
+	}
+	if rootPath == "" {
+		return ToolResult{}, fmt.Errorf("no root_path: project has no registered root_path and none provided")
+	}
+
+	// Walk local folder + chunk + upload.
+	stats, err := localIndex(ctx, t.client, name, rootPath)
 	if err != nil {
 		return ToolResult{}, err
 	}
+
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
-			"Indexing started for project %q (ID: %d). Job ID: %s\nStatus: queued (check dashboard for progress).\n"+
-				"Indexing runs in background; search will reflect new content once complete (~30s for small projects).",
-			name, projectID, jobID)}},
+			"Indexed project %q (ID: %d).\nFiles scanned: %d\nChunks: %d\nEmbedded: %d\nStored: %d\nDuration: %s\n",
+			name, projectID, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration)}},
 	}, nil
+}
+
+// localIndexStats holds results from local walk + chunk + upload.
+type localIndexStats struct {
+	FilesScanned int
+	Chunks       int
+	Embedded     int
+	Stored       int
+	Duration     string
+}
+
+// localIndex walks the local folder, chunks files, and uploads to dashboard.
+// This replaces the old "dashboard walks the filesystem" approach — no mounting.
+func localIndex(ctx context.Context, client *ragclient.Client, project, rootPath string) (*localIndexStats, error) {
+	start := time.Now()
+	ch := chunker.New()
+	stats := &localIndexStats{}
+
+	gi, err := indexer.LoadGitignore(rootPath)
+	if err != nil {
+		slog.Warn("gitignore load failed", "error", err)
+	}
+
+	const batchSize = 64
+	var batch []ragclient.UploadDoc
+
+	walkErr := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable
+		}
+		if info.IsDir() {
+			name := info.Name()
+			if name == ".git" || name == "node_modules" || name == "vendor" ||
+				name == "dist" || name == "build" || name == "__pycache__" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !indexer.IsSourceFilePublic(path) {
+			return nil
+		}
+		if gi != nil {
+			rel, _ := filepath.Rel(rootPath, path)
+			if gi.Match(rel) {
+				return nil
+			}
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Warn("read file failed", "file", path, "error", err)
+			return nil
+		}
+		if len(data) > 1024*1024 { // skip files > 1MB
+			return nil
+		}
+
+		stats.FilesScanned++
+
+		relPath, _ := filepath.Rel(rootPath, path)
+		chunks, err := ch.ChunkFile(ctx, data, relPath)
+		if err != nil {
+			slog.Warn("chunk failed", "file", relPath, "error", err)
+			return nil
+		}
+
+		for _, c := range chunks {
+			stats.Chunks++
+			doc := ragclient.UploadDoc{
+				ID:      uuidV5(project, relPath, c.StartLine),
+				Content: c.Content,
+				Meta: map[string]string{
+					"source_file": relPath,
+					"language":    c.Language,
+					"symbol":      c.Symbol,
+					"name":        c.Name,
+					"start_line":  fmt.Sprintf("%d", c.StartLine),
+					"end_line":    fmt.Sprintf("%d", c.EndLine),
+				},
+			}
+			batch = append(batch, doc)
+			if len(batch) >= batchSize {
+				result, err := client.UploadAndIndex(ctx, project, batch)
+				if err != nil {
+					return err
+				}
+				stats.Embedded += result.Embedded
+				stats.Stored += result.Indexed
+				batch = batch[:0]
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return stats, fmt.Errorf("walk: %w", walkErr)
+	}
+
+	// Flush remaining.
+	if len(batch) > 0 {
+		result, err := client.UploadAndIndex(ctx, project, batch)
+		if err != nil {
+			return stats, fmt.Errorf("upload final batch: %w", err)
+		}
+		stats.Embedded += result.Embedded
+		stats.Stored += result.Indexed
+	}
+
+	stats.Duration = time.Since(start).Round(time.Millisecond).String()
+	return stats, nil
+}
+
+// uuidV5 generates a deterministic UUID v5 for (project, file, line).
+func uuidV5(project, file string, line int) string {
+	return uuid.NewSHA1(uuid.NameSpaceURL,
+		[]byte(fmt.Sprintf("%s:%s:%d", project, file, line))).String()
 }
 
 // --- ListProjectsTool ---
@@ -506,8 +643,8 @@ func (t *CreateProjectTool) Description() string {
 	return "Register a project in the bit-multi-brain-rag dashboard and trigger initial indexing. " +
 		"Idempotent: safe to call on already-registered projects (returns existing). " +
 		"Use this when opening a new or existing project folder for the first time. " +
-		"The root_path must be accessible from the dashboard server (NOT the MCP client). " +
-		"For local dev (dashboard in Docker), mount the source folder as a volume."
+		"root_path is the LOCAL filesystem path (where the MCP client runs). " +
+		"Files are scanned and chunked locally, then sent to the dashboard for embedding — no mounting needed."
 }
 
 func (t *CreateProjectTool) InputSchema() map[string]any {
@@ -520,7 +657,7 @@ func (t *CreateProjectTool) InputSchema() map[string]any {
 			},
 			"root_path": map[string]any{
 				"type":        "string",
-				"description": "Root path of the source code, as seen from the DASHBOARD server (not the MCP client). Example: '/code' if mounted as Docker volume.",
+				"description": "LOCAL filesystem path to the project root (where the MCP client runs). Example: '/home/user/my-app' or 'C:/code/my-app'.",
 			},
 			"description": map[string]any{
 				"type":        "string",
@@ -528,7 +665,7 @@ func (t *CreateProjectTool) InputSchema() map[string]any {
 			},
 			"index": map[string]any{
 				"type":        "boolean",
-				"description": "If true (default), trigger background indexing immediately after creation.",
+				"description": "If true (default), scan files locally + upload to dashboard for embedding immediately.",
 				"default":     true,
 			},
 		},
@@ -602,16 +739,16 @@ func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (To
 	sb.WriteString(fmt.Sprintf("IMPORTANT: Use project_id=%d in all subsequent tool calls (rag_search_code, rag_index_project, etc).\n", p.ID))
 
 	if doIndex {
-		jobID, err := t.client.IndexProject(ctx, name)
+		stats, err := localIndex(ctx, t.client, name, rootPath)
 		if err != nil {
-			sb.WriteString(fmt.Sprintf("WARNING: indexing failed to start: %v\n", err))
+			sb.WriteString(fmt.Sprintf("WARNING: indexing failed: %v\n", err))
 			sb.WriteString("Call rag_index_project manually to retry.\n")
 		} else {
-			sb.WriteString(fmt.Sprintf("Indexing started (job: %s). Search will be available in ~30s.\n", jobID))
+			sb.WriteString(fmt.Sprintf("Indexing complete: %d files, %d chunks, %d embedded, %d stored (%s).\n",
+				stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration))
 		}
 	}
 	sb.WriteString("\nNext steps:\n")
-	sb.WriteString("- Wait ~30s for indexing to complete\n")
 	sb.WriteString(fmt.Sprintf("- Call rag_search_code with project_id=%d to search\n", p.ID))
 	return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
 }

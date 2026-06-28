@@ -133,6 +133,29 @@ func matchGitignorePattern(pattern, relPath string, isDir bool) bool {
 	return negate // if negated and no match, return false
 }
 
+// GitignoreFilter is an exported, simplified gitignore matcher for use by
+// the MCP client (which walks files locally). It loads the root .gitignore
+// and provides a simple Match method. Nested .gitignore support requires
+// the full walk-based matcher (used internally by the dashboard indexer).
+type GitignoreFilter struct {
+	inner *gitignoreMatcher
+}
+
+// LoadGitignore creates a GitignoreFilter by loading .gitignore from rootPath.
+func LoadGitignore(rootPath string) (*GitignoreFilter, error) {
+	g := newGitignoreMatcher()
+	g.loadDir(rootPath, 0)
+	return &GitignoreFilter{inner: g}, nil
+}
+
+// Match returns true if the relative path should be ignored.
+func (f *GitignoreFilter) Match(relPath string) bool {
+	if f == nil || f.inner == nil {
+		return false
+	}
+	return f.inner.match(relPath, false)
+}
+
 // globMatch is a minimal glob matcher supporting * and **.
 func globMatch(pattern, name string) bool {
 	// Handle ** (matches any number of path segments).
