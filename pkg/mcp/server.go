@@ -310,9 +310,9 @@ type CodeRAGTool struct {
 func (t *CodeRAGTool) Name() string { return "rag_search_code" }
 
 func (t *CodeRAGTool) Description() string {
-	return "Semantic search across indexed source code for a project. " +
-		"Calls the bit-multi-brain-rag dashboard (remote) over HTTPS. " +
-		"Returns the most relevant code chunks with file paths and similarity scores."
+	return "Semantic search across indexed source code for a project. Uses hybrid retrieval (dense embeddings + BM25 keyword + RRF fusion). " +
+		"Returns the most relevant code chunks with file paths, line numbers, and similarity scores. " +
+		"PREFERRED over manual Grep/Glob exploration — one call replaces multiple search round trips."
 }
 
 func (t *CodeRAGTool) InputSchema() map[string]any {

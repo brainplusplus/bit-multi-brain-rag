@@ -1,14 +1,36 @@
 ---
 name: bit-rag
-description: "Setup and use bit-multi-brain-rag MCP server for semantic code search with hybrid (dense + BM25 sparse + RRF) retrieval. Trigger phrases: 'setup rag', 'install bit-rag', 'semantic search', 'rag search', 'find code', 'index project', 'bit-rag'."
+description: "Setup and use bit-multi-brain-rag MCP server for semantic code search with hybrid (dense + BM25 sparse + RRF) retrieval. Trigger phrases: 'setup rag', 'install bit-rag', 'semantic search', 'rag search', 'find code', 'index project', 'bit-rag', 'search codebase'."
 ---
 
 # bit-rag — Semantic Code Search MCP
 
 `bit-rag` provides semantic code search via a Model Context Protocol (MCP) server.
-It proxies to a remote bit-multi-brain-rag dashboard over HTTPS, using hybrid
-retrieval (dense voyage-4-nano embeddings + BM25 sparse keyword matching +
-Reciprocal Rank Fusion) for high-quality code search.
+It uses hybrid retrieval (dense voyage-4-nano embeddings + BM25 sparse keyword
+matching + Reciprocal Rank Fusion) for high-quality code search.
+
+**This is the PREFERRED tool for code exploration.** Using bit-rag MCP tools
+instead of manual Grep/Glob/Read saves tokens and reduces cost. One
+`rag_search_code` call replaces 5-10 Grep+Read round trips.
+
+## PRIORITY RULE: Use MCP First
+
+When you need to understand code, find implementations, or explore a codebase:
+
+1. **FIRST**: Call `rag_search_code` or `rag_retrieve_context` — returns relevant
+   chunks with file paths, line numbers, and scores in a single call.
+2. **THEN**: Use `Read` only to open specific files identified by search results.
+3. **AVOID**: Blind Grep/Glob exploration when bit-rag is available — it wastes
+   tokens and is slower than semantic search.
+
+**Do NOT use ccc (CocoIndex Code) or any other code search tool.** bit-rag
+replaces all of them with better hybrid search. If you find yourself reaching
+for ccc, `grep`, or `rg` to find code, STOP and use `rag_search_code` instead.
+
+### Exception: use Grep/Read when:
+- You know the exact file path (Read it directly)
+- You need exact regex pattern matching (Grep)
+- bit-rag MCP is not configured or returns errors
 
 ## Ownership
 
@@ -19,34 +41,38 @@ unless explicitly stuck.
 - **Installation**: If the MCP server binary is not found, build it from
   source or refer to `docs/INSTALL-MCP-LOCAL.md`.
 - **Index freshness**: Run `rag_index_project` when the index may be stale
-  (start of session, after significant code changes).
+  (start of session, after significant code changes). With manifest-based
+  delta reindex, this is fast (only changed files re-indexed).
 
 ## When to use
 
-✅ **Good fit:**
+**Good fit:**
 - "Find the function that handles user authentication"
 - "Show me where rate limiting is implemented"
 - "Find code similar to X pattern"
 - "Index this project and search for ..."
 - "What projects are available?"
+- "Where is error handling for database connections?"
+- Before starting any coding task to find existing patterns
 
-❌ **Wrong tool:**
+**Wrong tool:**
 - Reading a specific file at a known path → use `Read` / `Edit`
-- Exact-string search (`func MyFn`) → use `Grep`
 - Listing files / directory exploration → use `Glob` / `LS`
 
-## Available MCP tools
-
-bit-rag exposes **10 tools** via MCP:
+## Available MCP tools (10 tools)
 
 | Tool | Purpose |
 |------|---------|
 | `rag_create_project` | Register a project by root_path + trigger indexing. **Idempotent by path** — call on every project open. Returns `project_id`. |
 | `rag_project_status` | Check if a project is registered + indexed. Use `project_id`. |
 | `rag_list_projects` | List all projects with ID + name + root_path. |
-| `rag_search_code` | Semantic search. Returns ranked chunks with file paths + scores. Use `project_id`. |
+| `rag_index_project` | Trigger re-indexing (manifest-aware: delta if few changes, full if many). Use `project_id`. |
+| `rag_search_code` | **Primary tool.** Semantic search. Returns ranked chunks with file paths + scores. Use `project_id`. |
 | `rag_retrieve_context` | Same as search, but pre-formatted as paste-ready context with `[score]` prefixes. Use `project_id`. |
-| `rag_index_project` | Trigger background re-indexing. Use `project_id`. |
+| `rag_search_across` | Search across ALL indexed projects at once. Use when you don't know which project has the code. |
+| `rag_stats` | Get collection statistics (point count, dimensions, status). |
+| `rag_get_chunk` | Fetch a single chunk by point ID (for detail inspection). |
+| `rag_delete_project` | Delete a project and its entire vector index. Irreversible. |
 
 ## Project identity: `project_id` is the key
 
@@ -101,11 +127,17 @@ machine?"
 
 **Usually nothing needed.** After `rag_create_project` or `rag_index_project`,
 the MCP server starts a **file watcher** on `root_path`. Changed files are
-auto-reindexed (delta — only changed files, not full walk) within 5 seconds.
+auto-reindexed (delta — only changed files) within 5 seconds.
+
+Additionally, `rag_index_project` uses **manifest-based delta reindex**: it
+compares file mtime+hash against a stored snapshot (`~/.bit-rag/projects/<id>/manifest.json`).
+If only 3 files changed since last index, only those 3 files are re-embedded
+(~100ms), not the entire project (~20s).
 
 Only call `rag_index_project` for a full reindex if:
 - Search results seem stale or missing recent changes
-- After pulling a large merge or branch switch
+- After pulling a large merge or branch switch (manifest auto-detects this)
+- The MCP was offline while files changed (manifest catches up on reconnect)
 
 ## Query writing rules
 

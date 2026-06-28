@@ -132,6 +132,16 @@ func (s *Server) buildSettingsHTML(c echo.Context) string {
 		} else {
 			sb.WriteString("<div class='muted small' style='margin-top:16px;padding-top:16px;border-top:1px solid var(--border)'>Set <code>EMBEDDER_BINARY</code> to enable GPU/CPU switching for the local embedder.</div>")
 		}
+
+		// Cloud embedder provider (informational)
+		sb.WriteString("<div class='settings-row' style='border-top:1px solid var(--border);padding-top:16px;margin-top:16px'>")
+		sb.WriteString("<div class='settings-row-label'>Cloud provider</div>")
+		sb.WriteString("<div class='settings-row-value'>")
+		sb.WriteString(fmt.Sprintf("<span class='badge'>backend: %s</span>", template.HTMLEscapeString(s.cfg.ActiveBackend)))
+		sb.WriteString(fmt.Sprintf("<span class='muted small mono' style='margin-left:8px'>%s</span>", template.HTMLEscapeString(s.cfg.EmbeddingEndpoint)))
+		sb.WriteString("<div class='muted small' style='margin-top:6px'>Supported: llama_q8 (local), openai, voyage, cohere, ollama. Switch via <code>ACTIVE_BACKEND</code> + <code>EMBEDDING_ENDPOINT</code> + <code>EMBEDDING_API_KEY</code> env, then restart.</div>")
+		sb.WriteString("</div></div>")
+
 	} else {
 		// Docker mode: show container toolkit + switch buttons
 		// Container toolkit

@@ -2,30 +2,29 @@
 
 This project has a `bit-rag` MCP server installed for semantic code search.
 
+## Priority: Use MCP over manual search
+
+**bit-rag MCP is the preferred tool for code exploration.** Using
+`rag_search_code` or `rag_retrieve_context` saves tokens and reduces cost
+compared to multiple Grep+Read round trips.
+
+**Do NOT use ccc (CocoIndex Code) or similar tools.** bit-rag replaces them
+with hybrid search (semantic + BM25 keyword + RRF fusion).
+
 ## Session start (auto-onboard)
 
 When you start working on this project:
 
-1. Call `rag_create_project` with `root_path` = the local source code path
-   (where the MCP client runs — NOT the dashboard server path).
-   - If already registered → returns existing `project_id`
-   - If new → creates project, scans files locally, uploads chunks for embedding, returns `project_id`
+1. Call `rag_create_project` with `root_path` = the local source code path.
 2. Save the `project_id` for all subsequent calls.
-3. Indexing runs during the call (files scanned locally + uploaded). No waiting needed.
 
-**Do not ask the user to manually create or look up IDs.** `rag_create_project`
-is idempotent by root_path.
+## Auto-reindex (file watcher + manifest delta)
 
-## Auto-reindex (file watcher)
+The MCP server starts a **file watcher** on `root_path`. Changed files are
+auto-reindexed within 5 seconds. `rag_index_project` also uses manifest-based
+delta reindex — only changed files are re-embedded (~100ms vs ~20s full).
 
-After `rag_create_project` or `rag_index_project`, the MCP server starts a
-**file watcher** on `root_path`. When files change (create/edit/delete), it
-auto-reindexes only the changed files within 5 seconds.
-
-**You do NOT need to call `rag_index_project` after every code change.** The
-watcher handles it. Only call `rag_index_project` if:
-- Search results seem stale or missing recent changes.
-- You want a full reindex (e.g. after pulling a large merge).
+**You do NOT need to call `rag_index_project` after every code change.**
 
 ## Project identity: use `project_id`
 
