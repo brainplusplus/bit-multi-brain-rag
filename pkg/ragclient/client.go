@@ -168,7 +168,7 @@ func truncate(s string, n int) string {
 
 // Project represents a registered project in the dashboard.
 type Project struct {
-	ID          int    `json:"id"`
+	ID          int64  `json:"id"`
 	Name        string `json:"name"`
 	RootPath    string `json:"root_path"`
 	Description string `json:"description"`
@@ -322,4 +322,75 @@ func (c *Client) GetProject(ctx context.Context, name string) (*Project, error) 
 		}
 	}
 	return nil, nil
+}
+
+// GetProjectByID returns a single project by numeric ID. Returns nil if not found.
+func (c *Client) GetProjectByID(ctx context.Context, id int64) (*Project, error) {
+	projects, err := c.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range projects {
+		if projects[i].ID == id {
+			return &projects[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// GetProjectByPath returns a project whose root_path matches (case-insensitive).
+// Used for idempotent create: agent calls rag_create_project with root_path,
+// we check if already registered before creating.
+func (c *Client) GetProjectByPath(ctx context.Context, rootPath string) (*Project, error) {
+	projects, err := c.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	normalized := normalizePath(rootPath)
+	for i := range projects {
+		if normalizePath(projects[i].RootPath) == normalized {
+			return &projects[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// normalizePath normalizes a path for comparison: lowercases, strips trailing slash,
+// converts backslashes to forward slashes.
+func normalizePath(p string) string {
+	p = strings.ToLower(p)
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = strings.TrimSuffix(p, "/")
+	return p
+}
+
+// ResolveProjectIdentifier resolves either a project_id (numeric) or a
+// project name (string) to the actual project name. This is the core
+// helper for the ID-based MCP approach: agents pass project_id, we
+// resolve it to the name for the dashboard API (which uses name internally).
+//
+// projectID takes precedence over projectName. Returns the resolved name,
+// or empty string if neither is valid.
+func (c *Client) ResolveProjectIdentifier(ctx context.Context, projectID int64, projectName string) (string, error) {
+	if projectID > 0 {
+		p, err := c.GetProjectByID(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("resolve project_id %d: %w", projectID, err)
+		}
+		if p == nil {
+			return "", fmt.Errorf("project_id %d not found", projectID)
+		}
+		return p.Name, nil
+	}
+	if projectName != "" {
+		p, err := c.GetProject(ctx, projectName)
+		if err != nil {
+			return "", fmt.Errorf("resolve project %q: %w", projectName, err)
+		}
+		if p == nil {
+			return "", fmt.Errorf("project %q not found", projectName)
+		}
+		return p.Name, nil
+	}
+	return "", fmt.Errorf("either project_id or project must be provided")
 }

@@ -26,6 +26,11 @@ import (
 	"os"
 	"strings"
 
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/indexer"
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
+	"github.com/brainplusplus/bit-multi-brain-rag/pkg/ragclient"
+)
+
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/rag"
 	"github.com/brainplusplus/bit-multi-brain-rag/pkg/ragclient"
 )
@@ -213,9 +218,13 @@ func (t *CodeRAGTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"project_id": map[string]any{
+				"type":        "integer",
+				"description": "Numeric project ID (from rag_list_projects). Preferred over project name — guaranteed unique.",
+			},
 			"project": map[string]any{
 				"type":        "string",
-				"description": "Project name to search within (must already be indexed via the dashboard).",
+				"description": "Project name (fallback if project_id not known). May collide if multiple projects share similar names.",
 			},
 			"query": map[string]any{
 				"type":        "string",
@@ -227,27 +236,45 @@ func (t *CodeRAGTool) InputSchema() map[string]any {
 				"default":     5,
 			},
 		},
-		"required": []string{"project", "query"},
+		"required": []string{"query"},
 	}
 }
 
 func (t *CodeRAGTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
-	project, _ := args["project"].(string)
+	projectID, projectName := extractProjectArgs(args)
 	query, _ := args["query"].(string)
-	if project == "" || query == "" {
-		return ToolResult{}, fmt.Errorf("project and query are required")
+	if projectID == 0 && projectName == "" {
+		return ToolResult{}, fmt.Errorf("project_id or project is required")
+	}
+	if query == "" {
+		return ToolResult{}, fmt.Errorf("query is required")
 	}
 	limit := 5
 	if l, ok := args["limit"].(float64); ok && l > 0 {
 		limit = int(l)
 	}
-	results, err := t.client.Search(ctx, project, query, limit)
+	name, err := t.client.ResolveProjectIdentifier(ctx, projectID, projectName)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	results, err := t.client.Search(ctx, name, query, limit)
 	if err != nil {
 		return ToolResult{}, err
 	}
 	return ToolResult{
-		Content: []ContentBlock{{Type: "text", Text: formatResults(query, project, results)}},
+		Content: []ContentBlock{{Type: "text", Text: formatResults(query, name, results)}},
 	}, nil
+}
+
+// extractProjectArgs pulls project_id (float64 from JSON) and project (string)
+// from the args map. Returns (0, "") if neither is present.
+func extractProjectArgs(args map[string]any) (int64, string) {
+	var id int64
+	if v, ok := args["project_id"].(float64); ok {
+		id = int64(v)
+	}
+	name, _ := args["project"].(string)
+	return id, name
 }
 
 // formatResults renders search results as human-readable Markdown
@@ -295,9 +322,13 @@ func (t *RetrieveContextTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"project_id": map[string]any{
+				"type":        "integer",
+				"description": "Numeric project ID (from rag_list_projects). Preferred.",
+			},
 			"project": map[string]any{
 				"type":        "string",
-				"description": "Project name to search within.",
+				"description": "Project name (fallback if project_id not known).",
 			},
 			"query": map[string]any{
 				"type":        "string",
@@ -309,26 +340,33 @@ func (t *RetrieveContextTool) InputSchema() map[string]any {
 				"default":     5,
 			},
 		},
-		"required": []string{"project", "query"},
+		"required": []string{"query"},
 	}
 }
 
 func (t *RetrieveContextTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
-	project, _ := args["project"].(string)
+	projectID, projectName := extractProjectArgs(args)
 	query, _ := args["query"].(string)
-	if project == "" || query == "" {
-		return ToolResult{}, fmt.Errorf("project and query are required")
+	if projectID == 0 && projectName == "" {
+		return ToolResult{}, fmt.Errorf("project_id or project is required")
+	}
+	if query == "" {
+		return ToolResult{}, fmt.Errorf("query is required")
 	}
 	limit := 5
 	if l, ok := args["limit"].(float64); ok && l > 0 {
 		limit = int(l)
 	}
-	results, err := t.client.Search(ctx, project, query, limit)
+	name, err := t.client.ResolveProjectIdentifier(ctx, projectID, projectName)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	results, err := t.client.Search(ctx, name, query, limit)
 	if err != nil {
 		return ToolResult{}, err
 	}
 	return ToolResult{
-		Content: []ContentBlock{{Type: "text", Text: formatContext(query, project, results)}},
+		Content: []ContentBlock{{Type: "text", Text: formatContext(query, name, results)}},
 	}, nil
 }
 
@@ -375,29 +413,36 @@ func (t *IndexProjectTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"project_id": map[string]any{
+				"type":        "integer",
+				"description": "Numeric project ID (from rag_list_projects). Preferred.",
+			},
 			"project": map[string]any{
 				"type":        "string",
-				"description": "Project name to index (must already be registered in the dashboard).",
+				"description": "Project name (fallback if project_id not known).",
 			},
 		},
-		"required": []string{"project"},
 	}
 }
 
 func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
-	project, _ := args["project"].(string)
-	if project == "" {
-		return ToolResult{}, fmt.Errorf("project is required")
+	projectID, projectName := extractProjectArgs(args)
+	if projectID == 0 && projectName == "" {
+		return ToolResult{}, fmt.Errorf("project_id or project is required")
 	}
-	jobID, err := t.client.IndexProject(ctx, project)
+	name, err := t.client.ResolveProjectIdentifier(ctx, projectID, projectName)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	jobID, err := t.client.IndexProject(ctx, name)
 	if err != nil {
 		return ToolResult{}, err
 	}
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
-			"Indexing started for project %q. Job ID: %s\nStatus: queued (check dashboard for progress).\n"+
+			"Indexing started for project %q (ID: %d). Job ID: %s\nStatus: queued (check dashboard for progress).\n"+
 				"Indexing runs in background; search will reflect new content once complete (~30s for small projects).",
-			project, jobID)}},
+			name, projectID, jobID)}},
 	}, nil
 }
 
@@ -433,11 +478,12 @@ func (t *ListProjectsTool) Handle(ctx context.Context, args map[string]any) (Too
 		sb.WriteString("No projects registered. Use rag_create_project to register one.\n")
 	} else {
 		sb.WriteString(fmt.Sprintf("Registered projects (%d):\n\n", len(projects)))
-		sb.WriteString("| Name | Root Path | Domains |\n")
-		sb.WriteString("|------|-----------|--------|\n")
+		sb.WriteString("| ID | Name | Root Path | Domains |\n")
+		sb.WriteString("|----|------|-----------|--------|\n")
 		for _, p := range projects {
-			sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n", p.Name, p.RootPath, p.Domains))
+			sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s |\n", p.ID, p.Name, p.RootPath, p.Domains))
 		}
+		sb.WriteString("\nUse project_id in subsequent tool calls for guaranteed uniqueness.\n")
 	}
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: sb.String()}},
@@ -470,7 +516,7 @@ func (t *CreateProjectTool) InputSchema() map[string]any {
 		"properties": map[string]any{
 			"name": map[string]any{
 				"type":        "string",
-				"description": "Project name (unique identifier, e.g. 'my-app'). Used in all other tool calls.",
+				"description": "Project name. If omitted, auto-derived from root_path (format: {leaf}-{parent}, e.g. 'mitm-nodejs').",
 			},
 			"root_path": map[string]any{
 				"type":        "string",
@@ -486,15 +532,45 @@ func (t *CreateProjectTool) InputSchema() map[string]any {
 				"default":     true,
 			},
 		},
-		"required": []string{"name", "root_path"},
+		"required": []string{"root_path"},
 	}
 }
 
 func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
 	name, _ := args["name"].(string)
 	rootPath, _ := args["root_path"].(string)
-	if name == "" || rootPath == "" {
-		return ToolResult{}, fmt.Errorf("name and root_path are required")
+	if rootPath == "" {
+		return ToolResult{}, fmt.Errorf("root_path is required")
+	}
+
+	// Idempotent: check if a project with this root_path already exists.
+	// This is the PRIMARY entry point for agents — call on every project open.
+	existingByPath, _ := t.client.GetProjectByPath(ctx, rootPath)
+	if existingByPath != nil {
+		// Already registered by path. Return the ID immediately.
+		status, _ := t.client.GetIndexStatus(ctx, existingByPath.Name)
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Project %q already registered (ID: %d, root: %s).\n", existingByPath.Name, existingByPath.ID, existingByPath.RootPath))
+		sb.WriteString(fmt.Sprintf("Use project_id=%d for all subsequent calls.\n", existingByPath.ID))
+		if status != nil {
+			if status.IndexedDone > 0 {
+				sb.WriteString(fmt.Sprintf("Index: %d points, status: %s. Ready to search.\n", status.IndexedDone, status.Status))
+			} else {
+				sb.WriteString("Index: empty. Call rag_index_project to build.\n")
+			}
+		}
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
+	}
+
+	// Auto-derive project name from root_path if not provided.
+	// Uses leaf-first disambiguation: {leaf}-{parent} (e.g. "mitm-nodejs").
+	if name == "" {
+		existing, _ := t.client.ListProjects(ctx)
+		existingNames := make(map[string]bool, len(existing))
+		for _, p := range existing {
+			existingNames[p.Name] = true
+		}
+		name = indexer.DeriveProjectNameUnique(rootPath, existingNames)
 	}
 	desc, _ := args["description"].(string)
 	doIndex := true
@@ -502,19 +578,17 @@ func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (To
 		doIndex = v
 	}
 
-	// Check if already registered.
+	// Check if name collides (same name, different path).
 	existing, _ := t.client.GetProject(ctx, name)
 	if existing != nil {
-		// Already exists. Check index status.
-		status, _ := t.client.GetIndexStatus(ctx, name)
-		var msg string
-		if status != nil && status.IndexedDone > 0 {
-			msg = fmt.Sprintf("Project %q already registered and indexed (%d points). Ready to search.",
-				name, status.IndexedDone)
-		} else {
-			msg = fmt.Sprintf("Project %q already registered but not yet indexed. Call rag_index_project to build the index.", name)
+		// Already exists with this name but different path.
+		// Name collision → auto-rename.
+		existingList, _ := t.client.ListProjects(ctx)
+		existingNames := make(map[string]bool, len(existingList))
+		for _, p := range existingList {
+			existingNames[p.Name] = true
 		}
-		return ToolResult{Content: []ContentBlock{{Type: "text", Text: msg}}}, nil
+		name = indexer.ResolveNameCollision(name, existingNames)
 	}
 
 	// Create new project.
@@ -525,6 +599,7 @@ func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (To
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Project %q created (ID: %d, root: %s).\n", p.Name, p.ID, p.RootPath))
+	sb.WriteString(fmt.Sprintf("IMPORTANT: Use project_id=%d in all subsequent tool calls (rag_search_code, rag_index_project, etc).\n", p.ID))
 
 	if doIndex {
 		jobID, err := t.client.IndexProject(ctx, name)
@@ -537,7 +612,7 @@ func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (To
 	}
 	sb.WriteString("\nNext steps:\n")
 	sb.WriteString("- Wait ~30s for indexing to complete\n")
-	sb.WriteString("- Call rag_search_code or rag_retrieve_context to search\n")
+	sb.WriteString(fmt.Sprintf("- Call rag_search_code with project_id=%d to search\n", p.ID))
 	return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
 }
 
@@ -561,31 +636,40 @@ func (t *ProjectStatusTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"project_id": map[string]any{
+				"type":        "integer",
+				"description": "Numeric project ID. Preferred.",
+			},
 			"name": map[string]any{
 				"type":        "string",
-				"description": "Project name to check.",
+				"description": "Project name (fallback).",
 			},
 		},
-		"required": []string{"name"},
 	}
 }
 
 func (t *ProjectStatusTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
-	name, _ := args["name"].(string)
-	if name == "" {
-		return ToolResult{}, fmt.Errorf("name is required")
+	projectID, projectName := extractProjectArgs(args)
+	if projectID == 0 && projectName == "" {
+		return ToolResult{}, fmt.Errorf("project_id or name is required")
 	}
-	p, err := t.client.GetProject(ctx, name)
+	var p *ragclient.Project
+	var err error
+	if projectID > 0 {
+		p, err = t.client.GetProjectByID(ctx, projectID)
+	} else {
+		p, err = t.client.GetProject(ctx, projectName)
+	}
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("check project: %w", err)
 	}
 	var sb strings.Builder
 	if p == nil {
-		sb.WriteString(fmt.Sprintf("Project %q is NOT registered. Call rag_create_project with name + root_path to onboard it.\n", name))
+		sb.WriteString(fmt.Sprintf("Project (ID=%d, name=%q) is NOT registered. Call rag_create_project with root_path to onboard it.\n", projectID, projectName))
 		return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
 	}
-	sb.WriteString(fmt.Sprintf("Project %q is registered (ID: %d, root: %s, domains: %s).\n", p.Name, p.ID, p.RootPath, p.Domains))
-	status, _ := t.client.GetIndexStatus(ctx, name)
+	sb.WriteString(fmt.Sprintf("Project %q (ID: %d, root: %s, domains: %s).\n", p.Name, p.ID, p.RootPath, p.Domains))
+	status, _ := t.client.GetIndexStatus(ctx, p.Name)
 	if status == nil {
 		sb.WriteString("Index status: unknown.\n")
 	} else {
