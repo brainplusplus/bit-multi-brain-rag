@@ -638,35 +638,98 @@ func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (Too
 	// Build pattern filter from optional include/exclude args.
 	pf := buildPatternFilter(args)
 
-	// Manifest-aware index: delta reindex only changed files.
+	// Quick check: if manifest exists and no changes, return instantly.
+	pid := fmt.Sprintf("%d", proj.ID)
+	m, _ := manifest.Load(pid)
+	if m != nil {
+		fileList := walkSourceFiles(rootPath, pf)
+		diff := m.Compare(rootPath, fileList)
+		if !diff.HasChanges() {
+			// Up to date — start watcher and return immediately.
+			if t.wm != nil {
+				t.wm.StartWatching(name, pid, rootPath)
+			}
+			return ToolResult{
+				Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+					"Project %q is already up to date — no changes detected since last index (%d files tracked).\n"+
+						"File watcher active — changes will auto-reindex.",
+					name, len(fileList))}},
+			}, nil
+		}
+
+		// Few changes → sync (fast, <30s even on GPU).
+		changedCount := len(diff.ChangedFiles())
+		if changedCount <= 50 {
+			stats, wasDelta, err := IndexWithManifest(ctx, t.client, *proj, rootPath, pf)
+			if err != nil {
+				return ToolResult{}, err
+			}
+			if t.wm != nil {
+				t.wm.StartWatching(name, pid, rootPath)
+			}
+			mode := "delta"
+			if !wasDelta {
+				mode = "full"
+			}
+			return ToolResult{
+				Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+					"Indexed [%s]: %d files, %d chunks, %d embedded, %d stored (%s).\nFile watcher active.",
+					mode, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration)}}}, nil
+		}
+
+		// Many changes → async (return immediately, index in background).
+		go func() {
+			bgCtx := context.Background()
+			stats, wasDelta, err := IndexWithManifest(bgCtx, t.client, *proj, rootPath, pf)
+			if err != nil {
+				slog.Error("async index failed", "project", name, "error", err)
+				return
+			}
+			mode := "delta"
+			if !wasDelta {
+				mode = "full"
+			}
+			slog.Info("async index complete", "project", name, "mode", mode,
+				"files", stats.FilesScanned, "chunks", stats.Chunks, "embedded", stats.Embedded, "duration", stats.Duration)
+			// Start watcher after async index.
+			if t.wm != nil {
+				t.wm.StartWatching(name, pid, rootPath)
+			}
+		}()
+
+		return ToolResult{
+			Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+				"Indexing started in background for %q (%d files changed).\n"+
+					"This is a large reindex — it will take a few minutes.\n"+
+					"Progress visible at http://localhost:8081/projects/%d\n"+
+					"You can search immediately with existing index. Fresh results will appear after indexing completes.",
+				name, changedCount, proj.ID)}}}, nil
+	}
+
+	// No manifest → first index. For large projects, run async.
 	stats, wasDelta, err := IndexWithManifest(ctx, t.client, *proj, rootPath, pf)
 	if err != nil {
 		return ToolResult{}, err
 	}
-
-	// Start/refresh file watcher for auto re-index on changes.
 	if t.wm != nil {
-		t.wm.StartWatching(name, fmt.Sprintf("%d", proj.ID), rootPath)
+		t.wm.StartWatching(name, pid, rootPath)
 	}
 
 	mode := "full"
 	if wasDelta {
 		mode = "delta"
 	}
-	if stats.FilesScanned == 0 && wasDelta == false {
+	if stats.FilesScanned == 0 && !wasDelta {
 		return ToolResult{
 			Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
-				"Project %q is already up to date — no changes detected since last index.\n",
-				name)}},
-		}, nil
+				"Project %q is already up to date — no changes since last index.\n", name)}}}, nil
 	}
 
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
-			"Indexed project %q (ID: %d) [%s reindex].\nFiles scanned: %d\nChunks: %d\nEmbedded: %d\nStored: %d\nDuration: %s\n"+
+			"Indexed project %q (ID: %d) [%s].\nFiles: %d, Chunks: %d, Embedded: %d, Stored: %d (%s)\n"+
 				"File watcher active — changes will auto-reindex.\n",
-			name, projectID, mode, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration)}},
-	}, nil
+			name, projectID, mode, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration)}}}, nil
 }
 
 // LocalIndexStats holds results from local walk + chunk + upload.
