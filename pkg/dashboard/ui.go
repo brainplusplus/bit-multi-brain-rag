@@ -190,8 +190,8 @@ func (s *Server) renderShell(projects []store.Project) string {
 
 	// Navigation
 	sb += "<nav class='sidebar-nav'>"
-	sb += "<a href='/models' hx-get='/ui/models' hx-target='#main' hx-swap='innerHTML' hx-push-url='true' class='nav-link'><span class='nav-icon'>◈</span> Models</a>"
-	sb += "<a href='/settings' hx-get='/ui/settings' hx-target='#main' hx-swap='innerHTML' hx-push-url='true' class='nav-link'><span class='nav-icon'>⚙</span> Settings</a>"
+	sb += "<a href='/models' hx-get='/ui/models' hx-target='#main' hx-swap='innerHTML' hx-push-url='/models' class='nav-link'><span class='nav-icon'>◈</span> Models</a>"
+	sb += "<a href='/settings' hx-get='/ui/settings' hx-target='#main' hx-swap='innerHTML' hx-push-url='/settings' class='nav-link'><span class='nav-icon'>⚙</span> Settings</a>"
 	sb += "</nav>"
 
 	// Projects
@@ -262,8 +262,8 @@ func (s *Server) renderProjectList(projects []store.Project) string {
 	} else {
 		for _, p := range projects {
 			sb += fmt.Sprintf(
-				"<a href='/projects/%d' class='project-item' hx-get='/ui/projects/%d' hx-target='#main' hx-push-url='true'><span class='proj-name'>%s</span><span class='proj-domains'>%s</span></a>",
-				p.ID, p.ID, template.HTMLEscapeString(p.Name), template.HTMLEscapeString(p.Domains),
+				"<a href='/projects/%d' class='project-item' hx-get='/ui/projects/%d' hx-target='#main' hx-push-url='/projects/%d'><span class='proj-name'>%s</span><span class='proj-domains'>%s</span></a>",
+				p.ID, p.ID, p.ID, template.HTMLEscapeString(p.Name), template.HTMLEscapeString(p.Domains),
 			)
 		}
 	}
