@@ -74,7 +74,8 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 	// llama.app installer uses subcommand format: "llama serve --model ..."
 	// Traditional llama-server uses: "llama-server --model ..."
 	binaryName := filepath.Base(m.cfg.BinaryPath)
-	if binaryName == "llama.exe" || binaryName == "llama" {
+	needsServeSubcmd := binaryName == "llama.exe" || binaryName == "llama"
+	if needsServeSubcmd {
 		args = append([]string{"serve"}, args...)
 	}
 	if m.cfg.GPU {

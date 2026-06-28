@@ -47,3 +47,6 @@ lib/
 data/zvec/
 data/dashboard-local.db
 data/dashboard-local.log
+
+# Large model files
+data/models/*.gguf
