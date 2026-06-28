@@ -24,6 +24,36 @@ func (s *Server) uiIndex(c echo.Context) error {
 	return c.HTML(200, s.renderShell(projects))
 }
 
+// uiProjectDetailPage renders the full shell with a project detail as active content.
+func (s *Server) uiProjectDetailPage(c echo.Context) error {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.Redirect(302, "/projects")
+	}
+	p, err := s.store.GetProject(c.Request().Context(), id)
+	if err != nil {
+		return c.Redirect(302, "/projects")
+	}
+	projects, _ := s.store.ListProjects(c.Request().Context())
+	shell := s.renderShell(projects)
+
+	// Build the detail content (same as HTMX partial)
+	var jobPartial string
+	if s.jobs != nil {
+		if job, jerr := s.jobs.GetLatest(c.Request().Context(), p.Name); jerr == nil && job != nil {
+			jobPartial = s.renderJobStatus(job)
+		}
+	}
+	if jobPartial == "" {
+		jobPartial = emptyIndexStats()
+	}
+	detailHTML := s.renderProjectDetail(p, jobPartial)
+
+	// Inject into main content area, replacing default search bar
+	shell = strings.Replace(shell, "<main class='main' id='main'>", "<main class='main' id='main'>"+detailHTML, 1)
+	return c.HTML(200, shell)
+}
+
 // uiSettingsPage renders the full shell with settings as active content.
 func (s *Server) uiSettingsPage(c echo.Context) error {
 	projects, _ := s.store.ListProjects(c.Request().Context())
@@ -232,8 +262,8 @@ func (s *Server) renderProjectList(projects []store.Project) string {
 	} else {
 		for _, p := range projects {
 			sb += fmt.Sprintf(
-				"<div class='project-item' hx-get='/ui/projects/%d' hx-target='#main'><span class='proj-name'>%s</span><span class='proj-domains'>%s</span></div>",
-				p.ID, template.HTMLEscapeString(p.Name), template.HTMLEscapeString(p.Domains),
+				"<a href='/projects/%d' class='project-item' hx-get='/ui/projects/%d' hx-target='#main' hx-push-url='true'><span class='proj-name'>%s</span><span class='proj-domains'>%s</span></a>",
+				p.ID, p.ID, template.HTMLEscapeString(p.Name), template.HTMLEscapeString(p.Domains),
 			)
 		}
 	}

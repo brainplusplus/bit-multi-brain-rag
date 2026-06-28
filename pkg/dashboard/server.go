@@ -228,6 +228,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// --- Full-page routes (render entire shell with active panel) ---
 	e.GET("/", s.uiIndex)
 	e.GET("/projects", s.uiIndex)
+	e.GET("/projects/:id", s.uiProjectDetailPage)
 	e.GET("/settings", s.uiSettingsPage)
 	e.GET("/models", s.uiModelsPage)
 
