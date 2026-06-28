@@ -264,3 +264,62 @@ func (c *Client) GetIndexStatus(ctx context.Context, project string) (*IndexStat
 	}
 	return &out, nil
 }
+
+// CreateProject registers a new project in the dashboard. Idempotent: if the
+// project name already exists, returns the existing project (dashboard returns
+// 409, which we catch and treat as success).
+func (c *Client) CreateProject(ctx context.Context, name, rootPath, description string) (*Project, error) {
+	body, _ := json.Marshal(map[string]string{
+		"name":        name,
+		"root_path":   rootPath,
+		"description": description,
+	})
+	url := c.baseURL + "/api/v1/projects"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ragclient: do request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	// 409 = project already exists. Fetch it via ListProjects and return.
+	if resp.StatusCode == 409 {
+		projects, err := c.ListProjects(ctx)
+		if err != nil {
+			return nil, nil // already exists, but can't fetch — return nil (not error)
+		}
+		for _, p := range projects {
+			if p.Name == name {
+				return &p, nil
+			}
+		}
+		return nil, nil
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("ragclient: dashboard %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var p Project
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("ragclient: decode: %w", err)
+	}
+	return &p, nil
+}
+
+// GetProject returns a single project by name. Returns nil if not found.
+func (c *Client) GetProject(ctx context.Context, name string) (*Project, error) {
+	projects, err := c.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range projects {
+		if p.Name == name {
+			return &p, nil
+		}
+	}
+	return nil, nil
+}

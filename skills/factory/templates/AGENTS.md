@@ -2,6 +2,18 @@
 
 This project uses `bit-rag` MCP server for semantic code search.
 
+## Session start (auto-onboard)
+
+When you start working on this project, **before accepting search queries**:
+
+1. Call `rag_project_status` with project name `PROJECT_NAME`.
+2. If "NOT registered" → call `rag_create_project` with name `PROJECT_NAME`
+   and the correct `root_path`.
+3. If "registered, indexed=0" → call `rag_index_project`.
+4. Wait ~30s for indexing, then proceed.
+
+**Do not ask the user to manually create or index projects.** You own the lifecycle.
+
 ## Before you start coding
 
 1. Call `rag_retrieve_context` with the user's task/query and the project name `PROJECT_NAME`.

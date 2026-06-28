@@ -14,12 +14,30 @@ semantic code search. It uses hybrid retrieval: dense voyage-4-nano embeddings
 
 | Tool | When to use |
 |------|-------------|
+| `rag_project_status` | **Call first.** Check if project is registered + indexed. |
+| `rag_create_project` | Register new project + trigger initial indexing. Idempotent. |
 | `rag_search_code` | Semantic search across indexed code. Returns ranked chunks with scores. |
 | `rag_retrieve_context` | Same as search, but formatted as paste-ready context with `[score]` prefixes. Use before coding. |
 | `rag_index_project` | Trigger background re-index after significant code changes. |
 | `rag_list_projects` | Discover available project names before searching. |
 
-## Decision tree
+## Session start (AUTO-ONBOARD)
+
+When opening any project folder, **before accepting search queries**:
+
+```
+1. Detect project name (from folder name or ask user)
+2. Call rag_project_status
+   ├── "NOT registered" → call rag_create_project (name + root_path)
+   │                       → wait ~30s
+   ├── "registered, indexed=0" → call rag_index_project → wait ~30s
+   └── "registered, indexed=N" → ready ✓
+```
+
+**Do NOT ask the user to manually create projects.** The agent owns the
+lifecycle — use `rag_create_project` autonomously.
+
+## Decision tree (after onboard)
 
 ```
 User asks about code?

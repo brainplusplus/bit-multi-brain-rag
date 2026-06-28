@@ -70,6 +70,8 @@ func New(client *ragclient.Client, logger *slog.Logger) *Server {
 	s.Register(&RetrieveContextTool{client: client})
 	s.Register(&IndexProjectTool{client: client})
 	s.Register(&ListProjectsTool{client: client})
+	s.Register(&CreateProjectTool{client: client})
+	s.Register(&ProjectStatusTool{client: client})
 	return s
 }
 
@@ -428,7 +430,7 @@ func (t *ListProjectsTool) Handle(ctx context.Context, args map[string]any) (Too
 	}
 	var sb strings.Builder
 	if len(projects) == 0 {
-		sb.WriteString("No projects registered. Create a project via the dashboard UI first.\n")
+		sb.WriteString("No projects registered. Use rag_create_project to register one.\n")
 	} else {
 		sb.WriteString(fmt.Sprintf("Registered projects (%d):\n\n", len(projects)))
 		sb.WriteString("| Name | Root Path | Domains |\n")
@@ -440,4 +442,161 @@ func (t *ListProjectsTool) Handle(ctx context.Context, args map[string]any) (Too
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: sb.String()}},
 	}, nil
+}
+
+// --- CreateProjectTool ---
+
+// CreateProjectTool registers a new project in the dashboard. This is the
+// onboarding tool: when an agent opens a new/existing folder, it calls this
+// to register the project + trigger initial indexing. Idempotent: safe to
+// call on already-registered projects.
+type CreateProjectTool struct {
+	client *ragclient.Client
+}
+
+func (t *CreateProjectTool) Name() string { return "rag_create_project" }
+
+func (t *CreateProjectTool) Description() string {
+	return "Register a project in the bit-multi-brain-rag dashboard and trigger initial indexing. " +
+		"Idempotent: safe to call on already-registered projects (returns existing). " +
+		"Use this when opening a new or existing project folder for the first time. " +
+		"The root_path must be accessible from the dashboard server (NOT the MCP client). " +
+		"For local dev (dashboard in Docker), mount the source folder as a volume."
+}
+
+func (t *CreateProjectTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{
+				"type":        "string",
+				"description": "Project name (unique identifier, e.g. 'my-app'). Used in all other tool calls.",
+			},
+			"root_path": map[string]any{
+				"type":        "string",
+				"description": "Root path of the source code, as seen from the DASHBOARD server (not the MCP client). Example: '/code' if mounted as Docker volume.",
+			},
+			"description": map[string]any{
+				"type":        "string",
+				"description": "Optional human-readable description.",
+			},
+			"index": map[string]any{
+				"type":        "boolean",
+				"description": "If true (default), trigger background indexing immediately after creation.",
+				"default":     true,
+			},
+		},
+		"required": []string{"name", "root_path"},
+	}
+}
+
+func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
+	name, _ := args["name"].(string)
+	rootPath, _ := args["root_path"].(string)
+	if name == "" || rootPath == "" {
+		return ToolResult{}, fmt.Errorf("name and root_path are required")
+	}
+	desc, _ := args["description"].(string)
+	doIndex := true
+	if v, ok := args["index"].(bool); ok {
+		doIndex = v
+	}
+
+	// Check if already registered.
+	existing, _ := t.client.GetProject(ctx, name)
+	if existing != nil {
+		// Already exists. Check index status.
+		status, _ := t.client.GetIndexStatus(ctx, name)
+		var msg string
+		if status != nil && status.IndexedDone > 0 {
+			msg = fmt.Sprintf("Project %q already registered and indexed (%d points). Ready to search.",
+				name, status.IndexedDone)
+		} else {
+			msg = fmt.Sprintf("Project %q already registered but not yet indexed. Call rag_index_project to build the index.", name)
+		}
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: msg}}}, nil
+	}
+
+	// Create new project.
+	p, err := t.client.CreateProject(ctx, name, rootPath, desc)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("create project: %w", err)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Project %q created (ID: %d, root: %s).\n", p.Name, p.ID, p.RootPath))
+
+	if doIndex {
+		jobID, err := t.client.IndexProject(ctx, name)
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("WARNING: indexing failed to start: %v\n", err))
+			sb.WriteString("Call rag_index_project manually to retry.\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("Indexing started (job: %s). Search will be available in ~30s.\n", jobID))
+		}
+	}
+	sb.WriteString("\nNext steps:\n")
+	sb.WriteString("- Wait ~30s for indexing to complete\n")
+	sb.WriteString("- Call rag_search_code or rag_retrieve_context to search\n")
+	return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
+}
+
+// --- ProjectStatusTool ---
+
+// ProjectStatusTool checks whether a project is registered AND indexed.
+// Agents call this at session start to decide whether to auto-onboard.
+type ProjectStatusTool struct {
+	client *ragclient.Client
+}
+
+func (t *ProjectStatusTool) Name() string { return "rag_project_status" }
+
+func (t *ProjectStatusTool) Description() string {
+	return "Check if a project is registered and indexed. Returns registration status + " +
+		"index point count + last indexing job status. Use at session start to decide " +
+		"whether to call rag_create_project or rag_index_project."
+}
+
+func (t *ProjectStatusTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{
+				"type":        "string",
+				"description": "Project name to check.",
+			},
+		},
+		"required": []string{"name"},
+	}
+}
+
+func (t *ProjectStatusTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
+	name, _ := args["name"].(string)
+	if name == "" {
+		return ToolResult{}, fmt.Errorf("name is required")
+	}
+	p, err := t.client.GetProject(ctx, name)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("check project: %w", err)
+	}
+	var sb strings.Builder
+	if p == nil {
+		sb.WriteString(fmt.Sprintf("Project %q is NOT registered. Call rag_create_project with name + root_path to onboard it.\n", name))
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
+	}
+	sb.WriteString(fmt.Sprintf("Project %q is registered (ID: %d, root: %s, domains: %s).\n", p.Name, p.ID, p.RootPath, p.Domains))
+	status, _ := t.client.GetIndexStatus(ctx, name)
+	if status == nil {
+		sb.WriteString("Index status: unknown.\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("Index status: %s, files=%d/%d, indexed=%d", status.Status, status.FilesDone, status.FilesTotal, status.IndexedDone))
+		if len(status.Errors) > 0 {
+			sb.WriteString(fmt.Sprintf(", errors=%d", len(status.Errors)))
+		}
+		sb.WriteString("\n")
+		if status.IndexedDone == 0 {
+			sb.WriteString("Index is empty. Call rag_index_project to build it.\n")
+		}
+	}
+	return ToolResult{Content: []ContentBlock{{Type: "text", Text: sb.String()}}}, nil
 }

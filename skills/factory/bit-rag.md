@@ -37,23 +37,68 @@ unless explicitly stuck.
 
 ## Available MCP tools
 
-bit-rag exposes **4 tools** via MCP:
+bit-rag exposes **6 tools** via MCP:
 
 | Tool | Purpose |
 |------|---------|
-| `rag_search_code` | Semantic search across indexed source code. Returns ranked chunks with file paths, symbols, scores. |
-| `rag_retrieve_context` | Same as search, but returns results as a pre-formatted context string with `[score]` prefixes. Use before writing code. |
-| `rag_index_project` | Trigger background re-indexing for a project. Use after significant code changes. |
-| `rag_list_projects` | List all registered projects. Use to discover available project names. |
+| `rag_project_status` | Check if a project is registered + indexed. **Call this first at session start.** |
+| `rag_create_project` | Register a new project + trigger initial indexing. Idempotent. |
+| `rag_index_project` | Trigger background re-indexing (after code changes). |
+| `rag_list_projects` | List all registered projects. |
+| `rag_search_code` | Semantic search. Returns ranked chunks with file paths + scores. |
+| `rag_retrieve_context` | Same as search, but pre-formatted as paste-ready context with `[score]` prefixes. |
+
+## Session start workflow (AUTO-ONBOARD)
+
+**When opening a project folder (new or existing), the agent MUST do this
+before accepting search queries:**
+
+```
+1. Detect project name
+   - Derive from folder name (e.g. /home/user/my-app -> "my-app")
+   - Or ask the user for a project name
+
+2. Call rag_project_status with the project name
+   ├── "NOT registered" → call rag_create_project (name + root_path)
+   │                       → wait ~30s for initial indexing
+   ├── "registered, indexed=0" → call rag_index_project
+   │                               → wait ~30s
+   ├── "registered, indexed=N" → ready to search ✓
+   └── "registered, status=running" → wait, poll again in 10s
+
+3. Once indexed, proceed with normal workflow (search/retrieve)
+```
+
+**Do NOT ask the user to manually create projects via the dashboard.** The
+agent owns the lifecycle — use `rag_create_project` autonomously.
+
+### root_path note
+
+`root_path` in `rag_create_project` must be the path **as seen from the
+dashboard server**, not from the MCP client. For local dev (dashboard in
+Docker), this is typically the container mount path (e.g. `/code` if you
+mounted `-v /host/path:/code`). For remote deploy, it's the server
+filesystem path.
+
+If unsure, ask the user: "What is the source code path as seen from the
+dashboard server?"
 
 ## Workflow
 
+### Session start (auto-onboard)
+
+1. Detect project name from folder.
+2. Call `rag_project_status` to check registration + index state.
+3. If not registered → `rag_create_project` (auto-indexes).
+4. If registered but empty → `rag_index_project`.
+5. Wait for indexing (~30s for small projects).
+6. Now ready to search.
+
 ### Before coding (retrieve context)
 
-1. Call `rag_list_projects` to see available projects.
-2. Call `rag_retrieve_context` with the project name + a natural-language
+1. Call `rag_retrieve_context` with the project name + a natural-language
    description of the task.
-3. Read the returned context. If relevant, cite `File:Lines` in your plan.
+2. Read the returned context. If relevant, cite `File:Lines` in your plan.
 
 ### After coding (refresh index)
 
