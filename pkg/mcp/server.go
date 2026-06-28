@@ -561,7 +561,20 @@ func (t *IndexProjectTool) Handle(ctx context.Context, args map[string]any) (Too
 	}, nil
 }
 
-// localIndexStats holds results from local walk + chunk + upload.
+// LocalIndexStats holds results from local walk + chunk + upload.
+type LocalIndexStats = localIndexStats
+
+// LocalIndex walks a local folder, chunks files, and uploads to dashboard.
+// Exported for CLI use.
+func LocalIndex(ctx context.Context, client *ragclient.Client, project, rootPath string) (*LocalIndexStats, error) {
+	return localIndex(ctx, client, project, rootPath)
+}
+
+// DeltaIndex chunks and uploads ONLY changed files.
+// Exported for CLI watcher use.
+func DeltaIndex(ctx context.Context, client *ragclient.Client, project, rootPath string, changedFiles []string) (*LocalIndexStats, error) {
+	return deltaIndex(ctx, client, project, rootPath, changedFiles)
+}
 type localIndexStats struct {
 	FilesScanned int
 	Chunks       int
