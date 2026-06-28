@@ -328,38 +328,56 @@ func (s *Server) uiHybridToggle(c echo.Context) error {
 // Only works when EMBEDDER_BINARY is configured (embedded mode).
 func (s *Server) apiEmbedderSwitch(c echo.Context) error {
 	if s.embedderMgr == nil {
-		return c.JSON(400, map[string]string{"error": "embedder binary manager not configured. Set EMBEDDER_BINARY to enable local embedder switching."})
+		errMsg := "embedder binary manager not configured. Set EMBEDDER_BINARY to enable local embedder switching."
+		if c.Request().Header.Get("HX-Request") == "true" {
+			return s.uiSettingsPanel(c)
+		}
+		return c.JSON(400, map[string]string{"error": errMsg})
 	}
 
-	var req struct {
-		Mode string `json:"mode"`
+	// Accept both JSON body and form data (HTMX sends form-encoded)
+	mode := c.FormValue("mode")
+	if mode == "" {
+		var req struct {
+			Mode string `json:"mode"`
+		}
+		if err := c.Bind(&req); err == nil {
+			mode = req.Mode
+		}
 	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(400, map[string]string{"error": "invalid request"})
-	}
-	if req.Mode != "gpu" && req.Mode != "cpu" {
+	if mode != "gpu" && mode != "cpu" {
+		if c.Request().Header.Get("HX-Request") == "true" {
+			return s.uiSettingsPanel(c)
+		}
 		return c.JSON(400, map[string]string{"error": "mode must be 'gpu' or 'cpu'"})
 	}
 
 	// Stop existing embedder, flip GPU flag, restart.
 	s.embedderMgr.Stop()
-	s.embedderMgr.SetGPU(req.Mode == "gpu")
+	s.embedderMgr.SetGPU(mode == "gpu")
 
-	ctx, cancel := context.WithTimeout(c.Request().Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	endpoint, err := s.embedderMgr.Start(ctx)
 	if err != nil {
+		if c.Request().Header.Get("HX-Request") == "true" {
+			return s.uiSettingsPanel(c)
+		}
 		return c.JSON(500, map[string]string{"error": fmt.Sprintf("restart failed: %v", err)})
 	}
 
 	// Persist mode
-	s.store.SetSetting(c.Request().Context(), "embedder_mode", req.Mode)
+	s.store.SetSetting(c.Request().Context(), "embedder_mode", mode)
 
+	// HTMX: re-render settings page. API: return JSON.
+	if c.Request().Header.Get("HX-Request") == "true" {
+		return s.uiSettingsPanel(c)
+	}
 	return c.JSON(200, map[string]any{
 		"ok":       true,
-		"mode":     req.Mode,
+		"mode":     mode,
 		"endpoint": endpoint,
-		"message":  fmt.Sprintf("Embedder restarted in %s mode", req.Mode),
+		"message":  fmt.Sprintf("Embedder restarted in %s mode", mode),
 	})
 }
