@@ -69,6 +69,12 @@ if (Test-Path $dllSrc) {
 $zvecPath = Join-Path $RepoRoot "data\zvec"
 $dbPath = Join-Path $RepoRoot "data\dashboard-local.db"
 
+# In embedded mode, embedder endpoint should be localhost (not Docker service name)
+$embEndpoint = $envVars['EMBEDDING_ENDPOINT']
+if ($embEndpoint -match 'bit-rag-embedder') {
+    $embEndpoint = "http://localhost:8090"
+}
+
 # --- Create start script ---
 $startScript = Join-Path $binDir "start-dashboard.ps1"
 $startContent = @"
@@ -78,7 +84,7 @@ $startContent = @"
 `$env:DB_PATH = "$dbPath"
 `$env:QDRANT_URL = ""
 `$env:MCP_ENABLED = "false"
-`$env:EMBEDDING_ENDPOINT = "$($envVars['EMBEDDING_ENDPOINT'])"
+`$env:EMBEDDING_ENDPOINT = "$embEndpoint"
 `$env:EMBEDDING_API_KEY = "$($envVars['EMBEDDING_API_KEY'])"
 `$env:LLAMA_API_KEY = "$($envVars['LLAMA_API_KEY'])"
 `$env:EMBEDDING_MODEL = "$($envVars['EMBEDDING_MODEL'])"

@@ -79,6 +79,11 @@ DB_PATH="$REPO_ROOT/data/dashboard-local.db"
 mkdir -p "$ZVEC_PATH" "$DB_PATH"
 LOG_FILE="$REPO_ROOT/data/dashboard-svc.log"
 
+# In embedded mode, embedder endpoint should be localhost (not Docker service name)
+if [[ "${EMBEDDING_ENDPOINT:-}" == *"bit-rag-embedder"* ]]; then
+    EMBEDDING_ENDPOINT="http://localhost:8090"
+fi
+
 # --- Install ---
 if [[ "$(uname)" == "Darwin" ]]; then
     # macOS: launchd plist
