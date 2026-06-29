@@ -163,8 +163,8 @@ func New(client *ragclient.Client, logger *slog.Logger) *Server {
 		wm:     wm,
 	}
 	// Register tools (ADR-0007 Phase 9 expansion).
-	s.Register(&CodeRAGTool{client: client})
-	s.Register(&RetrieveContextTool{client: client})
+	s.Register(&CodeRAGTool{client: client, srv: s})
+	s.Register(&RetrieveContextTool{client: client, srv: s})
 	s.Register(&IndexProjectTool{client: client, wm: wm, srv: s})
 	s.Register(&ListProjectsTool{client: client})
 	s.Register(&CreateProjectTool{client: client, wm: wm})
@@ -326,6 +326,7 @@ func (s *Server) sendError(enc *json.Encoder, id json.RawMessage, code int, mess
 // /api/v1/search endpoint over HTTPS.
 type CodeRAGTool struct {
 	client *ragclient.Client
+	srv    *Server // for auto-onboard (indexingMu, wm)
 }
 
 func (t *CodeRAGTool) Name() string { return "rag_search_code" }
@@ -371,11 +372,13 @@ func (t *CodeRAGTool) Handle(ctx context.Context, args map[string]any) (ToolResu
 	if query == "" {
 		return ToolResult{}, fmt.Errorf("query is required")
 	}
-	name, err := resolveProject(ctx, t.client, args)
-	if err != nil {
-		return ToolResult{}, err
+
+	// Auto-onboard: resolve project, auto-create+index if needed.
+	name, ready, msg := ensureProject(ctx, t.srv, t.client, args)
+	if !ready {
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: msg}}}, nil
 	}
-	projectID, _ := extractProjectArgs(args)
+
 	limit := 5
 	if l, ok := args["limit"].(float64); ok && l > 0 {
 		limit = int(l)
@@ -384,9 +387,11 @@ func (t *CodeRAGTool) Handle(ctx context.Context, args map[string]any) (ToolResu
 	if err != nil {
 		return ToolResult{}, err
 	}
-	// If no results, diagnose why and give actionable guidance.
+	// If no results (indexed but query didn't match), give guidance.
 	if len(results) == 0 {
-		return ToolResult{Content: []ContentBlock{{Type: "text", Text: emptySearchMessage(ctx, t.client, name, projectID)}}}, nil
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+			"No matches for %q in project %q. Try different keywords or use Grep.",
+			query, name)}}}, nil
 	}
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: formatResults(query, name, results)}},
@@ -471,6 +476,111 @@ func extractProjectArgs(args map[string]any) (int64, string) {
 // 2. project (name)
 // 3. root_path (auto-resolve by path via dashboard)
 // Returns the resolved project name, or empty string + error.
+// ensureProject is the auto-onboard entry point. Called by search tools when
+// project resolution fails or project has 0 points. It auto-creates the project,
+// starts async indexing, and returns a guidance message for the agent.
+//
+// Returns:
+//   - (projectName, true, nil) if project exists and is indexed — proceed with search
+//   - ("", false, message) if indexing started or in progress — return message to agent
+func ensureProject(ctx context.Context, srv *Server, client *ragclient.Client, args map[string]any) (string, bool, string) {
+	rootPath, _ := args["root_path"].(string)
+	projectID, projectName := extractProjectArgs(args)
+
+	// Step 1: Resolve project (by ID, name, or root_path).
+	var proj *ragclient.Project
+	if projectID > 0 || projectName != "" {
+		name, err := client.ResolveProjectIdentifier(ctx, projectID, projectName)
+		if err == nil {
+			proj, _ = client.GetProject(ctx, name)
+		}
+	} else if rootPath != "" {
+		proj, _ = client.GetProjectByPath(ctx, rootPath)
+	}
+
+	// Step 2: If project not found, auto-create.
+	if proj == nil && rootPath != "" {
+		// Derive project name from path.
+		existing, _ := client.ListProjects(ctx)
+		existingNames := make(map[string]bool, len(existing))
+		for _, p := range existing {
+			existingNames[p.Name] = true
+		}
+		name := indexer.DeriveProjectNameUnique(rootPath, existingNames)
+		proj, _ = client.CreateProject(ctx, name, rootPath, "")
+	}
+
+	if proj == nil {
+		return "", false, fmt.Sprintf(
+			"Project not found. Provide root_path so it can be auto-created.\n" +
+				"Example: rag_search_code(root_path=\"D:/path/to/project\", query=\"...\")")
+	}
+
+	// Step 3: Check if already indexed.
+	stats, _ := client.GetStats(ctx, proj.Name)
+	if stats != nil && stats.PointsCount > 0 {
+		return proj.Name, true, "" // Ready to search.
+	}
+
+	// Step 4: Not indexed. Check if already indexing.
+	pidKey := fmt.Sprintf("%d", proj.ID)
+	if srv != nil {
+		if _, ok := srv.indexingMu.Load(pidKey); ok {
+			// Already indexing in background.
+			fileCount := 0
+			if proj.RootPath != "" {
+				fileCount = countSourceFiles(proj.RootPath)
+			}
+			estMin := 2
+			if fileCount > 5000 {
+				estMin = 5
+			} else if fileCount > 1000 {
+				estMin = 3
+			}
+			return "", false, fmt.Sprintf(
+				"Project %q is still indexing in background (%d files, est. %d min).\n"+
+					"While waiting, use Grep to search code directly.\n"+
+					"Retry rag_search_code with root_path=%q in ~%d seconds.",
+				proj.Name, fileCount, estMin, proj.RootPath, estMin*30)
+		}
+
+		// Step 5: Start indexing.
+		srv.indexingMu.Store(pidKey, true)
+		go func() {
+			defer srv.indexingMu.Delete(pidKey)
+			bgCtx := context.Background()
+			pf := buildPatternFilter(args)
+			_, _, err := IndexWithManifest(bgCtx, client, *proj, proj.RootPath, pf)
+			if err != nil {
+				slog.Error("auto-onboard index failed", "project", proj.Name, "error", err)
+			} else {
+				slog.Info("auto-onboard index complete", "project", proj.Name)
+			}
+			// Start watcher after index.
+			if srv.wm != nil {
+				srv.wm.StartWatching(proj.Name, pidKey, proj.RootPath)
+			}
+		}()
+	}
+
+	// Step 6: Return guidance message.
+	fileCount := 0
+	if proj.RootPath != "" {
+		fileCount = countSourceFiles(proj.RootPath)
+	}
+	estMin := 2
+	if fileCount > 5000 {
+		estMin = 5
+	} else if fileCount > 1000 {
+		estMin = 3
+	}
+	return "", false, fmt.Sprintf(
+		"Project %q not indexed yet (%d files detected). Indexing started in background (est. %d min).\n"+
+			"While waiting, use Grep to search code directly.\n"+
+			"Retry rag_search_code with root_path=%q in ~%d seconds.",
+		proj.Name, fileCount, estMin, proj.RootPath, estMin*30)
+}
+
 func resolveProject(ctx context.Context, client *ragclient.Client, args map[string]any) (string, error) {
 	projectID, projectName := extractProjectArgs(args)
 	if projectID > 0 || projectName != "" {
@@ -518,6 +628,7 @@ func formatResults(query, project string, results []rag.Result) string {
 // context string for LLM consumption. Inspired by enowx-rag's rag_retrieve_context.
 type RetrieveContextTool struct {
 	client *ragclient.Client
+	srv    *Server
 }
 
 func (t *RetrieveContextTool) Name() string { return "rag_retrieve_context" }
@@ -563,11 +674,13 @@ func (t *RetrieveContextTool) Handle(ctx context.Context, args map[string]any) (
 	if query == "" {
 		return ToolResult{}, fmt.Errorf("query is required")
 	}
-	name, err := resolveProject(ctx, t.client, args)
-	if err != nil {
-		return ToolResult{}, err
+
+	// Auto-onboard: resolve project, auto-create+index if needed.
+	name, ready, msg := ensureProject(ctx, t.srv, t.client, args)
+	if !ready {
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: msg}}}, nil
 	}
-	projectID, _ := extractProjectArgs(args)
+
 	limit := 5
 	if l, ok := args["limit"].(float64); ok && l > 0 {
 		limit = int(l)
@@ -577,7 +690,9 @@ func (t *RetrieveContextTool) Handle(ctx context.Context, args map[string]any) (
 		return ToolResult{}, err
 	}
 	if len(results) == 0 {
-		return ToolResult{Content: []ContentBlock{{Type: "text", Text: emptySearchMessage(ctx, t.client, name, projectID)}}}, nil
+		return ToolResult{Content: []ContentBlock{{Type: "text", Text: fmt.Sprintf(
+			"No context found for %q in project %q. Try different keywords or use Grep.",
+			query, name)}}}, nil
 	}
 	return ToolResult{
 		Content: []ContentBlock{{Type: "text", Text: formatContext(query, name, results)}},
