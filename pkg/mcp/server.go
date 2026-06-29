@@ -340,17 +340,21 @@ func (t *CodeRAGTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"project_id": map[string]any{
-				"type":        "integer",
-				"description": "Numeric project ID (from rag_list_projects). Preferred over project name — guaranteed unique.",
-			},
-			"project": map[string]any{
-				"type":        "string",
-				"description": "Project name (fallback if project_id not known). May collide if multiple projects share similar names.",
-			},
 			"query": map[string]any{
 				"type":        "string",
 				"description": "Natural-language query describing the code to find.",
+			},
+			"root_path": map[string]any{
+				"type":        "string",
+				"description": "Project root path (auto-resolves project). Use this if you don't have project_id.",
+			},
+			"project_id": map[string]any{
+				"type":        "integer",
+				"description": "Numeric project ID (optional, auto-resolved from root_path if omitted).",
+			},
+			"project": map[string]any{
+				"type":        "string",
+				"description": "Project name (fallback).",
 			},
 			"limit": map[string]any{
 				"type":        "integer",
@@ -363,21 +367,18 @@ func (t *CodeRAGTool) InputSchema() map[string]any {
 }
 
 func (t *CodeRAGTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
-	projectID, projectName := extractProjectArgs(args)
 	query, _ := args["query"].(string)
-	if projectID == 0 && projectName == "" {
-		return ToolResult{}, fmt.Errorf("project_id or project is required")
-	}
 	if query == "" {
 		return ToolResult{}, fmt.Errorf("query is required")
 	}
+	name, err := resolveProject(ctx, t.client, args)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	projectID, _ := extractProjectArgs(args)
 	limit := 5
 	if l, ok := args["limit"].(float64); ok && l > 0 {
 		limit = int(l)
-	}
-	name, err := t.client.ResolveProjectIdentifier(ctx, projectID, projectName)
-	if err != nil {
-		return ToolResult{}, err
 	}
 	results, err := t.client.Search(ctx, name, query, limit)
 	if err != nil {
@@ -465,6 +466,27 @@ func extractProjectArgs(args map[string]any) (int64, string) {
 	return id, name
 }
 
+// resolveProject is the unified project resolver. It tries in order:
+// 1. project_id (numeric, most precise)
+// 2. project (name)
+// 3. root_path (auto-resolve by path via dashboard)
+// Returns the resolved project name, or empty string + error.
+func resolveProject(ctx context.Context, client *ragclient.Client, args map[string]any) (string, error) {
+	projectID, projectName := extractProjectArgs(args)
+	if projectID > 0 || projectName != "" {
+		return client.ResolveProjectIdentifier(ctx, projectID, projectName)
+	}
+	// Try root_path auto-resolve.
+	if rootPath, ok := args["root_path"].(string); ok && rootPath != "" {
+		p, err := client.GetProjectByPath(ctx, rootPath)
+		if err == nil && p != nil {
+			return p.Name, nil
+		}
+		return "", fmt.Errorf("no project found for root_path %q — call rag_create_project first", rootPath)
+	}
+	return "", fmt.Errorf("project_id, project, or root_path is required")
+}
+
 // formatResults renders search results as human-readable Markdown
 // for AI agents to consume in tool_result.
 func formatResults(query, project string, results []rag.Result) string {
@@ -510,17 +532,21 @@ func (t *RetrieveContextTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"project_id": map[string]any{
-				"type":        "integer",
-				"description": "Numeric project ID (from rag_list_projects). Preferred.",
-			},
-			"project": map[string]any{
-				"type":        "string",
-				"description": "Project name (fallback if project_id not known).",
-			},
 			"query": map[string]any{
 				"type":        "string",
 				"description": "Natural-language query describing what you're looking for.",
+			},
+			"root_path": map[string]any{
+				"type":        "string",
+				"description": "Project root path (auto-resolves project). Use this if you don't have project_id.",
+			},
+			"project_id": map[string]any{
+				"type":        "integer",
+				"description": "Numeric project ID (optional, auto-resolved from root_path if omitted).",
+			},
+			"project": map[string]any{
+				"type":        "string",
+				"description": "Project name (fallback).",
 			},
 			"limit": map[string]any{
 				"type":        "integer",
@@ -533,21 +559,18 @@ func (t *RetrieveContextTool) InputSchema() map[string]any {
 }
 
 func (t *RetrieveContextTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
-	projectID, projectName := extractProjectArgs(args)
 	query, _ := args["query"].(string)
-	if projectID == 0 && projectName == "" {
-		return ToolResult{}, fmt.Errorf("project_id or project is required")
-	}
 	if query == "" {
 		return ToolResult{}, fmt.Errorf("query is required")
 	}
+	name, err := resolveProject(ctx, t.client, args)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	projectID, _ := extractProjectArgs(args)
 	limit := 5
 	if l, ok := args["limit"].(float64); ok && l > 0 {
 		limit = int(l)
-	}
-	name, err := t.client.ResolveProjectIdentifier(ctx, projectID, projectName)
-	if err != nil {
-		return ToolResult{}, err
 	}
 	results, err := t.client.Search(ctx, name, query, limit)
 	if err != nil {
@@ -1349,25 +1372,47 @@ func (t *CreateProjectTool) Handle(ctx context.Context, args map[string]any) (To
 
 	if doIndex {
 		pf := buildPatternFilter(args)
-		stats, wasDelta, err := IndexWithManifest(ctx, t.client, *p, rootPath, pf)
-		if err != nil {
-			sb.WriteString(fmt.Sprintf("WARNING: indexing failed: %v\n", err))
-			sb.WriteString("Call rag_index_project manually to retry.\n")
-		} else {
-			mode := "full"
-			if wasDelta {
-				mode = "delta"
-			}
-			if stats.FilesScanned == 0 && !wasDelta {
-				sb.WriteString("Index: already up to date — no changes since last index.\n")
-			} else {
-				sb.WriteString(fmt.Sprintf("Indexing complete [%s]: %d files, %d chunks, %d embedded, %d stored (%s).\n",
-					mode, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration))
-			}
-			// Start file watcher for auto re-index.
+		// Estimate file count to decide sync vs async.
+		fileList := walkSourceFiles(rootPath, pf)
+		fileCount := len(fileList)
+
+		if fileCount > 200 {
+			// Large project: async index, return immediately.
+			pidKey := fmt.Sprintf("%d", p.ID)
 			if t.wm != nil {
-				t.wm.StartWatching(name, fmt.Sprintf("%d", p.ID), rootPath)
-				sb.WriteString("File watcher active — changes will auto-reindex.\n")
+				t.wm.StartWatching(name, pidKey, rootPath)
+			}
+			go func() {
+				bgCtx := context.Background()
+				_, _, err := IndexWithManifest(bgCtx, t.client, *p, rootPath, pf)
+				if err != nil {
+					slog.Error("async create+index failed", "project", name, "error", err)
+				}
+			}()
+			sb.WriteString(fmt.Sprintf("Indexing started in background (%d files).\n", fileCount))
+			sb.WriteString("You can search immediately once initial indexing completes.\n")
+			sb.WriteString(fmt.Sprintf("Poll progress: call rag_project_status with project_id=%d\n", p.ID))
+		} else {
+			// Small project: sync index.
+			stats, wasDelta, err := IndexWithManifest(ctx, t.client, *p, rootPath, pf)
+			if err != nil {
+				sb.WriteString(fmt.Sprintf("WARNING: indexing failed: %v\n", err))
+				sb.WriteString("Call rag_index_project manually to retry.\n")
+			} else {
+				mode := "full"
+				if wasDelta {
+					mode = "delta"
+				}
+				if stats.FilesScanned == 0 && !wasDelta {
+					sb.WriteString("Index: already up to date.\n")
+				} else {
+					sb.WriteString(fmt.Sprintf("Indexing complete [%s]: %d files, %d chunks, %d embedded, %d stored (%s).\n",
+						mode, stats.FilesScanned, stats.Chunks, stats.Embedded, stats.Stored, stats.Duration))
+				}
+				if t.wm != nil {
+					t.wm.StartWatching(name, fmt.Sprintf("%d", p.ID), rootPath)
+					sb.WriteString("File watcher active.\n")
+				}
 			}
 		}
 	}
@@ -1396,9 +1441,13 @@ func (t *ProjectStatusTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"root_path": map[string]any{
+				"type":        "string",
+				"description": "Project root path (auto-resolves project).",
+			},
 			"project_id": map[string]any{
 				"type":        "integer",
-				"description": "Numeric project ID. Preferred.",
+				"description": "Numeric project ID (optional).",
 			},
 			"name": map[string]any{
 				"type":        "string",
@@ -1411,7 +1460,16 @@ func (t *ProjectStatusTool) InputSchema() map[string]any {
 func (t *ProjectStatusTool) Handle(ctx context.Context, args map[string]any) (ToolResult, error) {
 	projectID, projectName := extractProjectArgs(args)
 	if projectID == 0 && projectName == "" {
-		return ToolResult{}, fmt.Errorf("project_id or name is required")
+		if rootPath, ok := args["root_path"].(string); ok && rootPath != "" {
+			p, err := t.client.GetProjectByPath(ctx, rootPath)
+			if err == nil && p != nil {
+				projectID = p.ID
+				projectName = p.Name
+			}
+		}
+	}
+	if projectID == 0 && projectName == "" {
+		return ToolResult{}, fmt.Errorf("project_id, name, or root_path is required")
 	}
 	var p *ragclient.Project
 	var err error
