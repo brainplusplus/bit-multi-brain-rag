@@ -69,8 +69,10 @@ func (z *ZvecClient) getOrCreate(key CollectionKey) (*zvec.Collection, error) {
 	schema.AddField(zvec.NewFieldSchema("end_line", zvec.DataTypeInt64, true, 0))
 	schema.AddField(zvec.NewFieldSchema("content", zvec.DataTypeString, true, 0))
 
-	// Add FTS index on content field for BM25 full-text search.
+	// FTS indexes for hybrid search (BM25 keyword match on content + identifiers).
 	schema.AddIndex("content", zvec.NewIndexParams(zvec.IndexTypeFTS))
+	schema.AddIndex("source_file", zvec.NewIndexParams(zvec.IndexTypeFTS))
+	schema.AddIndex("name", zvec.NewIndexParams(zvec.IndexTypeFTS))
 
 	// Try to open existing collection first. If not found, create new.
 	collection, err := zvec.Open(collPath, nil)
@@ -147,24 +149,92 @@ func (z *ZvecClient) Index(ctx context.Context, key CollectionKey, docs []Docume
 }
 
 // SemanticSearch returns the k most relevant chunks for a query vector.
+// Uses MultiQuery to combine dense vector search + FTS (BM25) with RRF fusion
+// for hybrid retrieval. Falls back to dense-only if FTS fails.
 func (z *ZvecClient) SemanticSearch(ctx context.Context, key CollectionKey, queryVec []float32, limit int) ([]Result, error) {
+	return z.HybridSearch(ctx, key, queryVec, "", limit)
+}
+
+// HybridSearch combines dense vector search with FTS (BM25) using RRF fusion.
+// queryText is used for FTS keyword matching (empty = dense-only fallback).
+func (z *ZvecClient) HybridSearch(ctx context.Context, key CollectionKey, queryVec []float32, queryText string, limit int) ([]Result, error) {
 	collection, err := z.getOrCreate(key)
 	if err != nil {
 		return nil, err
 	}
 
+	outputFields := []string{"source_file", "language", "symbol", "name", "start_line", "end_line", "content"}
+
 	q := zvec.NewSearchQuery()
+	defer q.Destroy()
 	q.SetFieldName("embedding")
 	q.SetQueryVector(queryVec)
 	q.SetTopK(limit)
-	q.SetOutputFields([]string{"source_file", "language", "symbol", "name", "start_line", "end_line", "content"})
+	q.SetOutputFields(outputFields)
+
+	// Attach FTS for hybrid search (dense + BM25 fusion).
+	if queryText != "" {
+		fts := zvec.NewFTS()
+		if fts != nil {
+			fts.SetMatchString(queryText)
+			q.SetFTS(fts)
+			fts.Destroy()
+		}
+	}
 
 	docs, err := collection.Query(q)
 	if err != nil {
-		return nil, fmt.Errorf("zvec query: %w", err)
+		// Fallback: dense-only (FTS can fail on collections created before FTS schema change).
+		if queryText != "" {
+			q2 := zvec.NewSearchQuery()
+			q2.SetFieldName("embedding")
+			q2.SetQueryVector(queryVec)
+			q2.SetTopK(limit)
+			q2.SetOutputFields(outputFields)
+			docs, err = collection.Query(q2)
+			q2.Destroy()
+			if err != nil {
+				return nil, fmt.Errorf("zvec fallback query: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("zvec query: %w", err)
+		}
 	}
 
 	return zvecDocsToResults(docs), nil
+}
+
+func zvecDocsToResults(docs []*zvec.Doc) []Result {
+	results := make([]Result, 0, len(docs))
+	for _, d := range docs {
+		meta := make(map[string]string)
+		if v, err := d.GetStringField("source_file"); err == nil {
+			meta["source_file"] = v
+		}
+		if v, err := d.GetStringField("language"); err == nil {
+			meta["language"] = v
+		}
+		if v, err := d.GetStringField("symbol"); err == nil {
+			meta["symbol"] = v
+		}
+		if v, err := d.GetStringField("name"); err == nil {
+			meta["name"] = v
+		}
+		if v, err := d.GetInt64Field("start_line"); err == nil {
+			meta["start_line"] = fmt.Sprintf("%d", v)
+		}
+		if v, err := d.GetInt64Field("end_line"); err == nil {
+			meta["end_line"] = fmt.Sprintf("%d", v)
+		}
+		content, _ := d.GetStringField("content")
+		results = append(results, Result{
+			ID:      d.GetPK(),
+			Content: content,
+			Score:   float64(d.GetScore()),
+			Meta:    meta,
+		})
+	}
+	return results
 }
 
 // DeletePoints removes specific points by string ID (hashed to uint64 PK).
@@ -361,38 +431,4 @@ func hashDocID(id string) uint64 {
 func sanitizeZvecName(name string) string {
 	h := hashDocID(name)
 	return fmt.Sprintf("c%d", h%100000) // short numeric name
-}
-
-// zvecDocsToResults converts zvec query results to rag.Result.
-func zvecDocsToResults(docs []*zvec.Doc) []Result {
-	results := make([]Result, 0, len(docs))
-	for _, d := range docs {
-		meta := make(map[string]string)
-		if v, err := d.GetStringField("source_file"); err == nil {
-			meta["source_file"] = v
-		}
-		if v, err := d.GetStringField("language"); err == nil {
-			meta["language"] = v
-		}
-		if v, err := d.GetStringField("symbol"); err == nil {
-			meta["symbol"] = v
-		}
-		if v, err := d.GetStringField("name"); err == nil {
-			meta["name"] = v
-		}
-		if v, err := d.GetInt64Field("start_line"); err == nil {
-			meta["start_line"] = fmt.Sprintf("%d", v)
-		}
-		if v, err := d.GetInt64Field("end_line"); err == nil {
-			meta["end_line"] = fmt.Sprintf("%d", v)
-		}
-		content, _ := d.GetStringField("content")
-		results = append(results, Result{
-			ID:      d.GetPK(),
-			Content: content,
-			Score:   float64(d.GetScore()),
-			Meta:    meta,
-		})
-	}
-	return results
 }

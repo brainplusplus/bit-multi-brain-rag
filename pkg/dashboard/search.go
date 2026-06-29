@@ -45,13 +45,18 @@ func (s *Server) doSearch(ctx context.Context, project, query string, limit int)
 		return nil, fmt.Errorf("ensure collection %s: %w", key, err)
 	}
 
-	// Try hybrid search if enabled and collection supports sparse vectors.
+	// Try hybrid search if enabled.
 	if s.hybridEnabled() {
+		// Qdrant path: sparse vectors + RRF.
 		if qc, ok := s.rag.(*rag.QdrantClient); ok && qc.CollectionHasSparse(ctx, key) {
 			sparseVec := s.bm25.BuildSearchSparse(query)
 			if sparseVec != nil {
 				return qc.HybridSearch(ctx, key, vec, sparseVec, limit)
 			}
+		}
+		// zvec path: native FTS + MultiQuery + RRF.
+		if zc, ok := s.rag.(*rag.ZvecClient); ok {
+			return zc.HybridSearch(ctx, key, vec, query, limit)
 		}
 	}
 	// Fallback: dense-only search.
