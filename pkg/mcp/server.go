@@ -858,9 +858,19 @@ func IndexWithManifest(ctx context.Context, client *ragclient.Client, proj ragcl
 	}
 
 	// If >50% of files changed, full reindex is more efficient.
+	// But first, delete stale points for files that no longer exist on disk.
 	changedCount := len(diff.ChangedFiles())
 	if len(fileList) > 0 && changedCount*100/len(fileList) > 50 {
 		slog.Info("manifest: >50% files changed, full reindex", "project", proj.Name, "changed", changedCount, "total", len(fileList))
+
+		// Clean up: delete points for files in manifest but not on disk.
+		if len(diff.Deleted) > 0 {
+			slog.Info("cleaning stale points before reindex", "project", proj.Name, "deleted_files", len(diff.Deleted))
+			if _, err := client.UploadAndIndex(ctx, proj.Name, nil, diff.Deleted); err != nil {
+				slog.Warn("stale cleanup failed (continuing)", "error", err)
+			}
+		}
+
 		stats, err := localIndexWithPatterns(ctx, client, proj.Name, rootPath, pf)
 		if err != nil {
 			return nil, false, err
